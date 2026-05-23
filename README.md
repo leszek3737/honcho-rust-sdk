@@ -1,6 +1,6 @@
 # honcho-ai
 
-![rust-sdk](https://github.com/plastic-labs/honcho/actions/workflows/rust-sdk.yml/badge.svg)
+![CI](https://github.com/leszek3737/honcho-rust-sdk/actions/workflows/ci.yml/badge.svg)
 
 > **Status:** Alpha — do not use in production. This SDK is under active development.
 
@@ -244,8 +244,9 @@ These APIs have no equivalent in the Python/TypeScript SDKs:
 
 ## Links
 
+- [Repository](https://github.com/leszek3737/honcho-rust-sdk)
+- [Honcho Server](https://github.com/plastic-labs/honcho)
+- [OpenAPI Spec](./tests/schemas/openapi.json)
 - [Documentation](https://docs.rs/honcho-ai)
-- [Repository](https://github.com/plastic-labs/honcho)
-- [OpenAPI Spec](https://github.com/plastic-labs/honcho/tree/main/docs)
 - [Migration Guide](./MIGRATION.md)
 - [Changelog](./CHANGELOG.md)

@@ -3,7 +3,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **rust** (1992 symbols, 4528 relationships, 173 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **honcho-rust-sdk** (2147 symbols, 4981 relationships, 186 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -26,10 +26,10 @@ This project is indexed by GitNexus as **rust** (1992 symbols, 4528 relationship
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/rust/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/rust/clusters` | All functional areas |
-| `gitnexus://repo/rust/processes` | All execution flows |
-| `gitnexus://repo/rust/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/honcho-rust-sdk/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/honcho-rust-sdk/clusters` | All functional areas |
+| `gitnexus://repo/honcho-rust-sdk/processes` | All execution flows |
+| `gitnexus://repo/honcho-rust-sdk/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 
