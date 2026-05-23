@@ -1,0 +1,1 @@
+Writing smoke test context.rs. 24 tests. No unwrap/expect/panic. Use `?` with match for graceful error handling. Each test: Ok → report.pass, Err → report.fail.

@@ -1,0 +1,638 @@
+use std::fmt::Write as _;
+
+use crate::error::{HonchoError, Result};
+
+pub(crate) const API_BASE_PATH: &str = "v3";
+
+fn encode(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+fn validate_not_empty(id: &str, name: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(HonchoError::Validation(format!("{name} must not be empty")));
+    }
+    Ok(())
+}
+
+/// Builds path for listing all workspaces.
+pub(crate) fn workspaces() -> String {
+    format!("/{API_BASE_PATH}/workspaces")
+}
+
+/// Builds path for the workspace list endpoint.
+pub(crate) fn workspaces_list() -> String {
+    format!("/{API_BASE_PATH}/workspaces/list")
+}
+
+/// Builds path for a specific workspace.
+pub(crate) fn workspace(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for workspace search.
+pub(crate) fn workspace_search(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/search",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for workspace queue status.
+pub(crate) fn workspace_queue_status(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/queue/status",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for scheduling a dream in a workspace.
+pub(crate) fn workspace_schedule_dream(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/schedule_dream",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for listing peers in a workspace.
+pub(crate) fn peers(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for the peer list endpoint.
+pub(crate) fn peers_list(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/list",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for a specific peer.
+pub(crate) fn peer(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for peer chat.
+pub(crate) fn peer_chat(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}/chat",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for peer representation.
+pub(crate) fn peer_representation(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}/representation",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for peer card.
+pub(crate) fn peer_card(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}/card",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for peer context.
+pub(crate) fn peer_context(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}/context",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for peer search.
+pub(crate) fn peer_search(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}/search",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for listing sessions of a peer.
+pub(crate) fn peer_sessions_list(workspace_id: &str, peer_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/peers/{}/sessions",
+        encode(workspace_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for listing sessions in a workspace.
+pub(crate) fn sessions(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for the session list endpoint.
+pub(crate) fn sessions_list(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/list",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for a specific session.
+pub(crate) fn session(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for cloning a session.
+pub(crate) fn session_clone(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/clone",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for session context.
+pub(crate) fn session_context(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/context",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for session summaries.
+pub(crate) fn session_summaries(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/summaries",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for session search.
+pub(crate) fn session_search(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/search",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for listing peers in a session.
+pub(crate) fn session_peers(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/peers",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for per-peer session configuration.
+pub(crate) fn session_peer_config(
+    workspace_id: &str,
+    session_id: &str,
+    peer_id: &str,
+) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    validate_not_empty(peer_id, "peer_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/peers/{}/config",
+        encode(workspace_id),
+        encode(session_id),
+        encode(peer_id)
+    ))
+}
+
+/// Builds path for listing messages in a session.
+pub(crate) fn messages(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for the message list endpoint.
+pub(crate) fn messages_list(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages/list",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for a specific message.
+pub(crate) fn message(workspace_id: &str, session_id: &str, message_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    validate_not_empty(message_id, "message_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages/{}",
+        encode(workspace_id),
+        encode(session_id),
+        encode(message_id)
+    ))
+}
+
+/// Builds path for uploading a file to a session.
+pub(crate) fn messages_upload(workspace_id: &str, session_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(session_id, "session_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages/upload",
+        encode(workspace_id),
+        encode(session_id)
+    ))
+}
+
+/// Builds path for listing conclusions in a workspace.
+pub(crate) fn conclusions(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/conclusions",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for the conclusions list endpoint.
+pub(crate) fn conclusions_list(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/conclusions/list",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for querying conclusions.
+pub(crate) fn conclusions_query(workspace_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/conclusions/query",
+        encode(workspace_id)
+    ))
+}
+
+/// Builds path for a specific conclusion.
+pub(crate) fn conclusion(workspace_id: &str, conclusion_id: &str) -> Result<String> {
+    validate_not_empty(workspace_id, "workspace_id")?;
+    validate_not_empty(conclusion_id, "conclusion_id")?;
+    Ok(format!(
+        "/{API_BASE_PATH}/workspaces/{}/conclusions/{}",
+        encode(workspace_id),
+        encode(conclusion_id)
+    ))
+}
+
+/// Builds path for deleting a conclusion (same path as get).
+pub(crate) fn conclusion_delete(workspace_id: &str, conclusion_id: &str) -> Result<String> {
+    conclusion(workspace_id, conclusion_id)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn test_workspaces() {
+        assert_eq!(workspaces(), "/v3/workspaces");
+    }
+
+    #[test]
+    fn test_workspaces_list() {
+        assert_eq!(workspaces_list(), "/v3/workspaces/list");
+    }
+
+    #[test]
+    fn test_workspace() {
+        assert_eq!(workspace("ws1").unwrap(), "/v3/workspaces/ws1");
+    }
+
+    #[test]
+    fn test_workspace_search() {
+        assert_eq!(
+            workspace_search("ws1").unwrap(),
+            "/v3/workspaces/ws1/search"
+        );
+    }
+
+    #[test]
+    fn test_workspace_queue_status() {
+        assert_eq!(
+            workspace_queue_status("ws1").unwrap(),
+            "/v3/workspaces/ws1/queue/status"
+        );
+    }
+
+    #[test]
+    fn test_workspace_schedule_dream() {
+        assert_eq!(
+            workspace_schedule_dream("ws1").unwrap(),
+            "/v3/workspaces/ws1/schedule_dream"
+        );
+    }
+
+    #[test]
+    fn test_peers() {
+        assert_eq!(peers("ws1").unwrap(), "/v3/workspaces/ws1/peers");
+    }
+
+    #[test]
+    fn test_peers_list() {
+        assert_eq!(peers_list("ws1").unwrap(), "/v3/workspaces/ws1/peers/list");
+    }
+
+    #[test]
+    fn test_peer() {
+        assert_eq!(
+            peer("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice"
+        );
+    }
+
+    #[test]
+    fn test_peer_chat() {
+        assert_eq!(
+            peer_chat("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice/chat"
+        );
+    }
+
+    #[test]
+    fn test_peer_representation() {
+        assert_eq!(
+            peer_representation("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice/representation"
+        );
+    }
+
+    #[test]
+    fn test_peer_card() {
+        assert_eq!(
+            peer_card("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice/card"
+        );
+    }
+
+    #[test]
+    fn test_peer_context() {
+        assert_eq!(
+            peer_context("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice/context"
+        );
+    }
+
+    #[test]
+    fn test_peer_search() {
+        assert_eq!(
+            peer_search("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice/search"
+        );
+    }
+
+    #[test]
+    fn test_peer_sessions_list() {
+        assert_eq!(
+            peer_sessions_list("ws1", "alice").unwrap(),
+            "/v3/workspaces/ws1/peers/alice/sessions"
+        );
+    }
+
+    #[test]
+    fn test_sessions() {
+        assert_eq!(sessions("ws1").unwrap(), "/v3/workspaces/ws1/sessions");
+    }
+
+    #[test]
+    fn test_sessions_list() {
+        assert_eq!(
+            sessions_list("ws1").unwrap(),
+            "/v3/workspaces/ws1/sessions/list"
+        );
+    }
+
+    #[test]
+    fn test_session() {
+        assert_eq!(
+            session("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1"
+        );
+    }
+
+    #[test]
+    fn test_session_clone() {
+        assert_eq!(
+            session_clone("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/clone"
+        );
+    }
+
+    #[test]
+    fn test_session_context() {
+        assert_eq!(
+            session_context("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/context"
+        );
+    }
+
+    #[test]
+    fn test_session_summaries() {
+        assert_eq!(
+            session_summaries("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/summaries"
+        );
+    }
+
+    #[test]
+    fn test_session_search() {
+        assert_eq!(
+            session_search("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/search"
+        );
+    }
+
+    #[test]
+    fn test_session_peers() {
+        assert_eq!(
+            session_peers("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/peers"
+        );
+    }
+
+    #[test]
+    fn test_session_peer_config() {
+        assert_eq!(
+            session_peer_config("ws1", "sess1", "alice").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/peers/alice/config"
+        );
+    }
+
+    #[test]
+    fn test_messages() {
+        assert_eq!(
+            messages("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/messages"
+        );
+    }
+
+    #[test]
+    fn test_messages_list() {
+        assert_eq!(
+            messages_list("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/messages/list"
+        );
+    }
+
+    #[test]
+    fn test_message() {
+        assert_eq!(
+            message("ws1", "sess1", "msg1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/messages/msg1"
+        );
+    }
+
+    #[test]
+    fn test_messages_upload() {
+        assert_eq!(
+            messages_upload("ws1", "sess1").unwrap(),
+            "/v3/workspaces/ws1/sessions/sess1/messages/upload"
+        );
+    }
+
+    #[test]
+    fn test_conclusions() {
+        assert_eq!(
+            conclusions("ws1").unwrap(),
+            "/v3/workspaces/ws1/conclusions"
+        );
+    }
+
+    #[test]
+    fn test_conclusions_list() {
+        assert_eq!(
+            conclusions_list("ws1").unwrap(),
+            "/v3/workspaces/ws1/conclusions/list"
+        );
+    }
+
+    #[test]
+    fn test_conclusions_query() {
+        assert_eq!(
+            conclusions_query("ws1").unwrap(),
+            "/v3/workspaces/ws1/conclusions/query"
+        );
+    }
+
+    #[test]
+    fn test_conclusion() {
+        assert_eq!(
+            conclusion("ws1", "conc1").unwrap(),
+            "/v3/workspaces/ws1/conclusions/conc1"
+        );
+    }
+
+    #[test]
+    fn test_workspace_empty_id_returns_validation_error() {
+        let err = workspace("").unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert!(format!("{err}").contains("workspace_id"));
+    }
+
+    #[test]
+    fn test_peer_empty_peer_id_returns_validation_error() {
+        let err = peer("ws1", "").unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert!(format!("{err}").contains("peer_id"));
+    }
+
+    #[test]
+    fn test_session_empty_session_id_returns_validation_error() {
+        let err = session("ws1", "").unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert!(format!("{err}").contains("session_id"));
+    }
+
+    #[test]
+    fn test_message_empty_message_id_returns_validation_error() {
+        let err = message("ws1", "sess1", "").unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert!(format!("{err}").contains("message_id"));
+    }
+
+    #[test]
+    fn test_conclusion_empty_id_returns_validation_error() {
+        let err = conclusion("ws1", "").unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert!(format!("{err}").contains("conclusion_id"));
+    }
+}

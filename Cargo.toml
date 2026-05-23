@@ -1,0 +1,90 @@
+[package]
+name = "honcho-ai"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/plastic-labs/honcho"
+homepage = "https://github.com/plastic-labs/honcho"
+documentation = "https://docs.rs/honcho-ai"
+description = "Rust SDK for Honcho — AI agent memory and social cognition infrastructure"
+keywords = ["honcho", "ai", "memory", "agents"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+exclude = [
+    "tests/fixtures/parity/**",
+]
+
+[features]
+default = ["rustls-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+tracing = ["dep:tracing"]
+blocking = []
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bon = "3"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+httpdate = "1"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["io"] }
+url = "2"
+mime_guess = "2"
+tracing = { version = "0.1", optional = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+pretty_assertions = "1"
+rstest = "0.26"
+static_assertions = "1"
+jsonschema = "0.46"
+paste = "1"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+temp-env = "0.3"
+tempfile = "3"
+
+[[example]]
+name = "blocking"
+required-features = ["blocking"]
+
+[[example]]
+name = "blocking_upload_file"
+required-features = ["blocking"]
+
+[package.metadata.docs.rs]
+all-features = true
+features = ["blocking", "tracing"]
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# restriction — SDK discipline
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# pedantic noise reduction
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "warn"

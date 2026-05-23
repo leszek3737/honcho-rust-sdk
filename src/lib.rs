@@ -1,0 +1,66 @@
+//! # Honcho Rust SDK
+//!
+//! Rust SDK for [Honcho](https://github.com/plastic-labs/honcho) — AI agent memory
+//! and social cognition infrastructure.
+//!
+//! ## Status
+//!
+//! **Alpha** — this SDK is under active development and not yet ready for production use.
+//!
+
+#![forbid(unsafe_code)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    missing_docs
+)]
+#![warn(clippy::pedantic, clippy::cargo, rustdoc::broken_intra_doc_links)]
+#![allow(
+    clippy::module_name_repetitions,
+    clippy::missing_errors_doc,
+    clippy::multiple_crate_versions
+)]
+
+/// High-level Honcho client.
+pub mod client;
+/// Conclusion wrapper type.
+pub mod conclusion;
+/// Stream adapter for dialectic responses.
+pub mod dialectic_stream;
+/// Error types for the Honcho SDK.
+pub mod error;
+/// HTTP transport layer (client, routes, SSE decoding).
+pub mod http;
+/// Message wrapper type.
+pub mod message;
+/// Peer wrapper type.
+pub mod peer;
+/// Session wrapper type.
+pub mod session;
+/// Shared types for the Honcho SDK.
+pub mod types;
+/// File source abstraction for uploads.
+pub mod upload;
+
+pub use client::Honcho;
+pub use conclusion::{Conclusion, ConclusionCreateParams, ConclusionScope};
+pub use dialectic_stream::{DialecticStream, FinalResponse};
+pub use message::Message;
+pub use peer::Peer;
+pub use session::{Session, UploadFileBuilder};
+pub use upload::FileSource;
+
+pub use types::dialectic::DialecticOptions;
+pub use types::message::{MessageCreate, MessageResponse, MessageSearchOptions};
+pub use types::peer::PeerConfig;
+pub use types::peer::PeerContext;
+pub use types::session::{
+    SessionConfiguration, SessionContext, SessionContextOptions, SessionPeerConfig,
+    SessionSummaries,
+};
+pub use types::workspace::WorkspaceConfiguration;
+
+#[cfg(feature = "blocking")]
+pub mod blocking;
