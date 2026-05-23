@@ -13,7 +13,6 @@ categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
 exclude = [
     "tests/fixtures/parity/**",
-    "tests/schemas/**",
 ]
 
 [features]

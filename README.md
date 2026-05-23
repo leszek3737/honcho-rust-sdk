@@ -1,5 +1,7 @@
 # honcho-ai
 
+![CI](https://github.com/leszek3737/honcho-rust-sdk/actions/workflows/ci.yml/badge.svg)
+
 > **Status:** Alpha — do not use in production. This SDK is under active development.
 
 Rust SDK for [Honcho](https://github.com/plastic-labs/honcho) — AI agent memory and social cognition infrastructure.
@@ -244,6 +246,7 @@ These APIs have no equivalent in the Python/TypeScript SDKs:
 
 - [Repository](https://github.com/leszek3737/honcho-rust-sdk)
 - [Honcho Server](https://github.com/plastic-labs/honcho)
-- [OpenAPI Spec](https://github.com/plastic-labs/honcho/tree/main/docs)
+- [OpenAPI Spec](./tests/schemas/openapi.json)
+- [Documentation](https://docs.rs/honcho-ai)
 - [Migration Guide](./MIGRATION.md)
 - [Changelog](./CHANGELOG.md)
