@@ -28,14 +28,15 @@ fn workspace_response(
 }
 
 #[tokio::test]
-async fn gets_workspace_metadata_by_id() {
+async fn gets_workspace_metadata_by_post_get_or_create() {
     let server = MockServer::start().await;
 
     let metadata = json!({"env": "production", "team": "core"});
     let response = workspace_response(metadata, json!({}));
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "test-ws"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -53,8 +54,9 @@ async fn get_metadata_empty_when_no_metadata() {
 
     let response = workspace_response(json!({}), json!({}));
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "test-ws"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -110,14 +112,15 @@ async fn set_metadata_server_error_returns_error() {
 }
 
 #[tokio::test]
-async fn gets_workspace_configuration_by_id() {
+async fn gets_workspace_configuration_by_post_get_or_create() {
     let server = MockServer::start().await;
 
     let config = json!({"reasoning": {"enabled": true}});
     let response = workspace_response(json!({}), config);
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "test-ws"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -134,8 +137,9 @@ async fn get_configuration_empty_when_no_configuration() {
 
     let response = workspace_response(json!({}), json!({}));
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "test-ws"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -147,6 +151,29 @@ async fn get_configuration_empty_when_no_configuration() {
     assert!(result.peer_card.is_none());
     assert!(result.summary.is_none());
     assert!(result.dream.is_none());
+}
+
+#[tokio::test]
+async fn gets_workspace_configuration_raw_by_post_get_or_create() {
+    let server = MockServer::start().await;
+
+    let config = json!({"unknown_future_field": {"enabled": true}});
+    let response = workspace_response(json!({}), config);
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "test-ws"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .mount(&server)
+        .await;
+
+    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
+    let result = honcho.get_configuration_raw().await.unwrap();
+
+    assert_eq!(
+        result.get("unknown_future_field").unwrap(),
+        &json!({"enabled": true})
+    );
 }
 
 #[tokio::test]
@@ -178,11 +205,12 @@ async fn workspace_id_accessor() {
 }
 
 #[tokio::test]
-async fn get_metadata_returns_error_on_404() {
+async fn get_metadata_returns_error_when_get_or_create_fails() {
     let server = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/nonexistent"))
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "nonexistent"})))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
         .mount(&server)
         .await;
@@ -197,11 +225,12 @@ async fn get_metadata_returns_error_on_404() {
 }
 
 #[tokio::test]
-async fn get_configuration_returns_error_on_404() {
+async fn get_configuration_returns_error_when_get_or_create_fails() {
     let server = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/nonexistent"))
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({"id": "nonexistent"})))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
         .mount(&server)
         .await;
@@ -219,4 +248,39 @@ async fn get_configuration_returns_error_on_404() {
 async fn honcho_constructor_rejects_invalid_url() {
     let result = Honcho::new("not a url", "test-ws");
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn honcho_constructor_rejects_invalid_base_urls() {
+    for base_url in ["localhost:8000", "ftp://example.com", "http://"] {
+        let result = Honcho::new(base_url, "test-ws");
+        assert!(result.is_err(), "accepted base_url: {base_url}");
+    }
+}
+
+#[tokio::test]
+async fn honcho_constructor_normalizes_subpath_trailing_slash() {
+    let honcho = Honcho::new("http://localhost:8000/api/", "test-ws").unwrap();
+    assert_eq!(honcho.base_url().as_str(), "http://localhost:8000/api");
+}
+
+#[tokio::test]
+async fn honcho_constructor_rejects_invalid_workspace_ids() {
+    for workspace_id in ["", "has space", "slash/id", "nonascii-é"] {
+        let result = Honcho::new("http://localhost:8000", workspace_id);
+        assert!(result.is_err(), "accepted workspace_id: {workspace_id}");
+    }
+}
+
+#[tokio::test]
+async fn honcho_constructor_rejects_too_long_workspace_id() {
+    let workspace_id = "a".repeat(513);
+    let result = Honcho::new("http://localhost:8000", &workspace_id);
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn honcho_constructor_accepts_valid_workspace_id() {
+    let honcho = Honcho::new("http://localhost:8000", "abc-XYZ_123").unwrap();
+    assert_eq!(honcho.workspace_id(), "abc-XYZ_123");
 }

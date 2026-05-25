@@ -214,7 +214,7 @@ impl BlockingListConclusionsBuilder {
         }
     }
 
-    /// Page size.
+    /// Page size. Must be in `1..=100`.
     #[must_use]
     pub fn size(self, size: u32) -> Self {
         Self {

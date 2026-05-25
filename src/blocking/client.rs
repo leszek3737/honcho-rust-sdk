@@ -169,6 +169,8 @@ impl Honcho {
     }
 
     /// List peers with filters, collecting across pages.
+    ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
     pub fn peers_with_filters(
         &self,
         filters: HashMap<String, Value>,
@@ -194,6 +196,8 @@ impl Honcho {
     }
 
     /// List sessions with filters, collecting across pages.
+    ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
     pub fn sessions_with_filters(
         &self,
         filters: HashMap<String, Value>,

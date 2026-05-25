@@ -130,7 +130,7 @@ let msgs = session.upload_file(FileSource::bytes("doc.pdf", data, "application/p
     .send().await?;
 
 // Streaming upload
-let msgs = session.upload_file_streamed("large.bin", reader, "application/octet-stream")
+let msgs = session.upload_file_streamed("large.txt", reader, "text/plain")
     .peer("alice")
     .send().await?;
 
@@ -141,6 +141,7 @@ session.set_peers(["alice", "bob"]).await?;
 session.remove_peers(["bob"]).await?;
 let peers = session.peers().await?;
 let cfg = session.get_peer_configuration("alice").await?;
+// alice must already be present; add_peer/add_peers/set_peers above satisfy this.
 session.set_peer_configuration("alice", &cfg).await?;
 
 // Context & Search
@@ -164,6 +165,8 @@ session.set_configuration(config).await?;
 ```
 
 ### Pagination
+
+Page numbers are 1-based. Page size must be between 1 and 100 inclusive.
 
 ```rust
 let page = client.peers().await?;
@@ -239,7 +242,7 @@ These APIs have no equivalent in the Python/TypeScript SDKs:
 | Context (OpenAI/Anthropic) | ✓      | ✓    |
 | Blocking API               | ✗      | ✓    |
 | Webhooks                   | ✓      | ✗    |
-| API keys                   | ✓      | ✗    |
+| API keys                   | ✓      | ✓    |
 
 
 ## Links

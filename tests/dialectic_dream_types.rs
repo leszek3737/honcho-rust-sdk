@@ -83,6 +83,35 @@ fn reasoning_level_default_is_low() {
     assert_eq!(ReasoningLevel::default(), ReasoningLevel::Low);
 }
 
+#[test]
+fn dialectic_options_validate_accepts_10000_chars() {
+    let options = DialecticOptions::builder()
+        .query("a".repeat(10_000))
+        .build();
+
+    options.validate().unwrap();
+}
+
+#[test]
+fn dialectic_options_validate_rejects_10001_chars() {
+    let options = DialecticOptions::builder()
+        .query("a".repeat(10_001))
+        .build();
+
+    let err = options.validate().unwrap_err();
+    assert_eq!(err.code(), "validation_error");
+    assert_eq!(err.message(), "query must be at most 10000 characters");
+}
+
+#[test]
+fn dialectic_options_validate_counts_unicode_chars_not_bytes() {
+    let options = DialecticOptions::builder()
+        .query("🦀".repeat(10_000))
+        .build();
+
+    options.validate().unwrap();
+}
+
 // ── Dream ───────────────────────────────────────────────────────────
 
 #[test]

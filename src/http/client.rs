@@ -15,6 +15,34 @@ const DEFAULT_MAX_RETRIES: u32 = 2;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 
+pub(crate) fn normalize_base_url(base_url: &str) -> Result<Url> {
+    let mut base_url = Url::parse(base_url)
+        .map_err(|e| HonchoError::Configuration(format!("invalid base_url: {e}")))?;
+
+    match base_url.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(HonchoError::Configuration(format!(
+                "invalid base_url scheme: {scheme}"
+            )));
+        }
+    }
+
+    if base_url.host().is_none() {
+        return Err(HonchoError::Configuration(
+            "base_url must include a host".into(),
+        ));
+    }
+
+    let path = base_url.path().to_owned();
+    if path.ends_with('/') && path.len() > 1 {
+        let trimmed = path.trim_end_matches('/');
+        base_url.set_path(trimmed);
+    }
+
+    Ok(base_url)
+}
+
 struct Inner {
     client: reqwest::Client,
     base_url: Url,
@@ -59,15 +87,14 @@ impl HttpClient {
     }
 
     pub fn from_params(params: HttpClientParams) -> Result<Self> {
-        let mut base_url = Url::parse(&params.base_url)
-            .map_err(|e| HonchoError::Configuration(format!("invalid base_url: {e}")))?;
+        let base_url = normalize_base_url(&params.base_url)?;
+        Self::from_params_with_base_url(params, base_url)
+    }
 
-        let path = base_url.path().to_owned();
-        if path.ends_with('/') && path.len() > 1 {
-            let trimmed = path.trim_end_matches('/');
-            base_url.set_path(trimmed);
-        }
-
+    pub(crate) fn from_params_with_base_url(
+        params: HttpClientParams,
+        base_url: Url,
+    ) -> Result<Self> {
         let version = env!("CARGO_PKG_VERSION");
         let mut client_headers = HeaderMap::new();
         client_headers.insert(
@@ -562,6 +589,26 @@ mod tests {
         let server = MockServer::start().await;
         let result = HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build());
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn builder_accepts_pre_normalized_base_url() {
+        let server = MockServer::start().await;
+        let base_url = normalize_base_url(&format!("{}/", server.uri())).unwrap();
+        let client = HttpClient::from_params_with_base_url(
+            HttpClient::builder().base_url("unused value").build(),
+            base_url,
+        )
+        .unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/v3/test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
+            .mount(&server)
+            .await;
+
+        let result: Peer = client.get("/v3/test", &[]).await.unwrap();
+        assert_eq!(result.id, "p1");
     }
 
     #[tokio::test]

@@ -636,7 +636,7 @@ impl ListConclusionsBuilder {
         self
     }
 
-    /// Set the page size (default 50).
+    /// Set the page size (default 50, must be in `1..=100`).
     ///
     /// # Examples
     ///
@@ -690,11 +690,6 @@ impl ListConclusionsBuilder {
     /// # }
     /// ```
     pub async fn send(self) -> Result<ConclusionPage> {
-        if self.size == 0 {
-            return Err(HonchoError::Validation(
-                "page size must be greater than 0".to_string(),
-            ));
-        }
         let mut filters = serde_json::json!({
             "observer_id": self.scope.inner.observer,
             "observed_id": self.scope.inner.observed,

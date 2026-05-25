@@ -292,7 +292,7 @@ pub struct SessionListOptions {
     #[serde(default = "default_page")]
     #[builder(default = default_page())]
     pub page: u64,
-    /// Page size.
+    /// Page size. Must be in `1..=100`.
     #[serde(default = "default_size")]
     #[builder(default = default_size())]
     pub size: u64,

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{HonchoError, Result};
+
+const MAX_DIALECTIC_QUERY_CHARS: usize = 10_000;
+
 /// Reasoning effort level for dialectic queries.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -54,6 +58,30 @@ pub struct DialecticOptions {
     #[serde(default, skip_serializing_if = "is_default_reasoning_level")]
     #[builder(default = ReasoningLevel::Low)]
     pub reasoning_level: ReasoningLevel,
+}
+
+/// Validate a dialectic query before sending it to the API.
+pub fn validate_dialectic_query(query: &str) -> Result<()> {
+    if query.is_empty() {
+        return Err(HonchoError::Validation(
+            "query must not be empty".to_owned(),
+        ));
+    }
+
+    if query.chars().count() > MAX_DIALECTIC_QUERY_CHARS {
+        return Err(HonchoError::Validation(format!(
+            "query must be at most {MAX_DIALECTIC_QUERY_CHARS} characters"
+        )));
+    }
+
+    Ok(())
+}
+
+impl DialecticOptions {
+    /// Validate options before sending them to the API.
+    pub fn validate(&self) -> Result<()> {
+        validate_dialectic_query(&self.query)
+    }
 }
 
 /// Response from the representation endpoint.

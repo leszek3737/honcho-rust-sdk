@@ -52,7 +52,7 @@ pub struct WorkspaceConfiguration {
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
 pub struct WorkspaceCreate {
-    /// Unique identifier for the new workspace (1-100 chars, `[a-zA-Z0-9_-]+`).
+    /// Unique identifier for the new workspace (1-512 chars, `[a-zA-Z0-9_-]+`).
     pub id: String,
     /// Arbitrary metadata. Defaults to `{}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

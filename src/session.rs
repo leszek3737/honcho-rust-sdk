@@ -770,6 +770,10 @@ impl Session {
 
     /// Set per-peer configuration for a specific peer in this session.
     ///
+    /// The peer must already be present in the session. This method does not
+    /// create or add peers; use [`Session::add_peer`] or [`Session::add_peers`]
+    /// first. If the peer is absent, the server may return 404/`NotFound`.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -859,6 +863,8 @@ impl Session {
 
     /// List messages in this session with optional filters, page, size, and reverse.
     ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -902,6 +908,9 @@ impl Session {
 
     /// Begin a file upload to this session.
     ///
+    /// The API currently accepts `text/plain`, `application/pdf`, and
+    /// `application/json`; other MIME types may be rejected by the server.
+    ///
     /// Returns an [`UploadFileBuilder`]. You **must** call `.peer(id)` and
     /// then `.send()` to complete the upload.
     ///
@@ -926,6 +935,9 @@ impl Session {
     }
 
     /// Begin a file upload to this session from a streaming reader.
+    ///
+    /// The API currently accepts `text/plain`, `application/pdf`, and
+    /// `application/json`; other MIME types may be rejected by the server.
     ///
     /// The reader is fully buffered into memory before uploading. This is
     /// **not** true streaming — use [`Session::upload_file`] with a
