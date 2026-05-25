@@ -863,6 +863,8 @@ impl Session {
 
     /// List messages in this session with optional filters, page, size, and reverse.
     ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
+    ///
     /// # Examples
     ///
     /// ```no_run

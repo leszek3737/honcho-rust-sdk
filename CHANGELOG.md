@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-05-25
+
+### Added
+
+- `HonchoError::is_retryable()` to expose the SDK retry policy for callers.
+- Client-side validation for dialectic queries, including the 10,000 character maximum.
+- Client-side validation for pagination parameters (`page >= 1`, `size` between 1 and 100).
+- Client-side validation for workspace IDs (`1..=512`, ASCII alphanumeric, `_`, or `-`).
+- CI MSRV check for Rust 1.88.0.
+
+### Changed
+
+- Workspace metadata and configuration reads now use the OpenAPI `POST /v3/workspaces` get-or-create endpoint.
+- `Honcho::base_url()` now reports the same normalized base URL used by the HTTP client.
+- CI now runs the full all-features test suite and avoids duplicate doctest execution.
+- Upload and peer-configuration docs now describe supported MIME types and peer existence requirements.
+
+### Fixed
+
+- Invalid base URLs such as `localhost:8000`, unsupported schemes, or URLs without hosts are rejected during client construction.
+- Base URLs with non-root trailing slashes are normalized consistently between `Honcho` and `HttpClient`.
+- `Honcho::schedule_dream` rejects an empty `observer` before making network requests.
+- Pagination rejects invalid `page`/`size` values before making network requests.
+- Route and docs tests cover new validation boundaries and workspace get-or-create behavior.
+- README upload and peer-management examples corrected.
+
 ## [0.1.1] - 2025-05-13
 
 ### Breaking Changes

@@ -88,7 +88,13 @@ impl HttpClient {
 
     pub fn from_params(params: HttpClientParams) -> Result<Self> {
         let base_url = normalize_base_url(&params.base_url)?;
+        Self::from_params_with_base_url(params, base_url)
+    }
 
+    pub(crate) fn from_params_with_base_url(
+        params: HttpClientParams,
+        base_url: Url,
+    ) -> Result<Self> {
         let version = env!("CARGO_PKG_VERSION");
         let mut client_headers = HeaderMap::new();
         client_headers.insert(
@@ -583,6 +589,26 @@ mod tests {
         let server = MockServer::start().await;
         let result = HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build());
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn builder_accepts_pre_normalized_base_url() {
+        let server = MockServer::start().await;
+        let base_url = normalize_base_url(&format!("{}/", server.uri())).unwrap();
+        let client = HttpClient::from_params_with_base_url(
+            HttpClient::builder().base_url("unused value").build(),
+            base_url,
+        )
+        .unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/v3/test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
+            .mount(&server)
+            .await;
+
+        let result: Peer = client.get("/v3/test", &[]).await.unwrap();
+        assert_eq!(result.id, "p1");
     }
 
     #[tokio::test]

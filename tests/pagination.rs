@@ -669,6 +669,43 @@ async fn paginate_post_with_reverse_param() {
 }
 
 #[tokio::test]
+async fn paginate_post_sends_page_one_size_one_query() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use honcho_ai::http::client::HttpClient;
+    use honcho_ai::types::pagination::paginate_post;
+
+    let server = MockServer::start().await;
+    let http = HttpClient::from_params(
+        HttpClient::builder()
+            .base_url(server.uri())
+            .max_retries(0)
+            .build(),
+    )
+    .unwrap();
+
+    let page_body = page_json(&["alice"], 1, 1, 1, 1);
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/peers/list"))
+        .and(query_param("page", "1"))
+        .and(query_param("size", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page_body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page: Page<Peer> = paginate_post(&http, "/v3/workspaces/ws1/peers/list", None, 1, 1, false)
+        .await
+        .unwrap();
+
+    assert_eq!(page.items()[0].id, "alice");
+    assert_eq!(page.page(), 1);
+    assert_eq!(page.size(), 1);
+}
+
+#[tokio::test]
 async fn paginate_post_rejects_invalid_page_and_size_before_request() {
     use honcho_ai::http::client::HttpClient;
     use honcho_ai::types::pagination::paginate_post;

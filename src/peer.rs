@@ -657,6 +657,8 @@ impl Peer {
 
     /// List sessions for this peer with filters and pagination options.
     ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
+    ///
     /// # Examples
     ///
     /// ```no_run

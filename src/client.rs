@@ -94,8 +94,10 @@ impl Honcho {
     pub fn new(base_url: &str, workspace_id: &str) -> Result<Self> {
         validate_workspace_id(workspace_id)?;
         let url = normalize_base_url(base_url)?;
-        let http =
-            HttpClient::from_params(HttpClient::builder().base_url(url.to_string()).build())?;
+        let http = HttpClient::from_params_with_base_url(
+            HttpClient::builder().base_url(base_url.to_owned()).build(),
+            url.clone(),
+        )?;
         Ok(Self {
             inner: Arc::new(Inner {
                 http,
@@ -152,9 +154,9 @@ impl Honcho {
         validate_workspace_id(&resolved_workspace_id)?;
         let base_url = normalize_base_url(&resolved_base_url)?;
 
-        let http = HttpClient::from_params(
+        let http = HttpClient::from_params_with_base_url(
             HttpClient::builder()
-                .base_url(base_url.to_string())
+                .base_url(resolved_base_url)
                 .maybe_api_key(resolved_api_key)
                 .maybe_http_client(params.http_client)
                 .timeout(params.timeout.unwrap_or(Duration::from_secs(60)))
@@ -162,6 +164,7 @@ impl Honcho {
                 .default_headers(params.default_headers.unwrap_or_default())
                 .default_query(params.default_query.unwrap_or_default())
                 .build(),
+            base_url.clone(),
         )?;
 
         Ok(Self {
@@ -632,6 +635,8 @@ impl Honcho {
 
     /// List peers with filters.
     ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -699,6 +704,8 @@ impl Honcho {
     }
 
     /// List sessions with filters.
+    ///
+    /// `page` is 1-based. `size` must be in `1..=100`.
     ///
     /// # Examples
     ///

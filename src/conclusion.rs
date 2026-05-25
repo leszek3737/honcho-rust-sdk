@@ -636,7 +636,7 @@ impl ListConclusionsBuilder {
         self
     }
 
-    /// Set the page size (default 50).
+    /// Set the page size (default 50, must be in `1..=100`).
     ///
     /// # Examples
     ///
