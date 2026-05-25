@@ -152,6 +152,10 @@ impl Session {
     }
 
     /// Set per-peer configuration.
+    ///
+    /// The peer must already be present in the session. This method does not
+    /// create or add peers; use [`Session::add_peer`] or [`Session::add_peers`]
+    /// first. If the peer is absent, the server may return 404/`NotFound`.
     pub fn set_peer_configuration(&self, peer_id: &str, config: &SessionPeerConfig) -> Result<()> {
         block_on(self.inner.set_peer_configuration(peer_id, config))
     }
@@ -248,6 +252,9 @@ impl Session {
 
     /// Begin a file upload to this session.
     ///
+    /// The API currently accepts `text/plain`, `application/pdf`, and
+    /// `application/json`; other MIME types may be rejected by the server.
+    ///
     /// Returns a [`BlockingUploadFileBuilder`]. You **must** call `.peer(id)`
     /// and then `.send()` to complete the upload.
     ///
@@ -271,6 +278,9 @@ impl Session {
     }
 
     /// Begin a file upload from a synchronous reader.
+    ///
+    /// The API currently accepts `text/plain`, `application/pdf`, and
+    /// `application/json`; other MIME types may be rejected by the server.
     ///
     /// The reader is consumed in a background thread and piped to the async
     /// multipart stream **without buffering the entire file in memory**.

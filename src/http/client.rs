@@ -15,6 +15,34 @@ const DEFAULT_MAX_RETRIES: u32 = 2;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 
+pub(crate) fn normalize_base_url(base_url: &str) -> Result<Url> {
+    let mut base_url = Url::parse(base_url)
+        .map_err(|e| HonchoError::Configuration(format!("invalid base_url: {e}")))?;
+
+    match base_url.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(HonchoError::Configuration(format!(
+                "invalid base_url scheme: {scheme}"
+            )));
+        }
+    }
+
+    if base_url.host().is_none() {
+        return Err(HonchoError::Configuration(
+            "base_url must include a host".into(),
+        ));
+    }
+
+    let path = base_url.path().to_owned();
+    if path.ends_with('/') && path.len() > 1 {
+        let trimmed = path.trim_end_matches('/');
+        base_url.set_path(trimmed);
+    }
+
+    Ok(base_url)
+}
+
 struct Inner {
     client: reqwest::Client,
     base_url: Url,
@@ -59,14 +87,7 @@ impl HttpClient {
     }
 
     pub fn from_params(params: HttpClientParams) -> Result<Self> {
-        let mut base_url = Url::parse(&params.base_url)
-            .map_err(|e| HonchoError::Configuration(format!("invalid base_url: {e}")))?;
-
-        let path = base_url.path().to_owned();
-        if path.ends_with('/') && path.len() > 1 {
-            let trimmed = path.trim_end_matches('/');
-            base_url.set_path(trimmed);
-        }
+        let base_url = normalize_base_url(&params.base_url)?;
 
         let version = env!("CARGO_PKG_VERSION");
         let mut client_headers = HeaderMap::new();

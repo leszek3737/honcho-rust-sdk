@@ -16,7 +16,7 @@ use crate::http::client::HttpClient;
 use crate::http::routes;
 use crate::http::sse::parse_sse_stream;
 use crate::types::dialectic::RepresentationResponse;
-use crate::types::dialectic::{DialecticOptions, ReasoningLevel};
+use crate::types::dialectic::{DialecticOptions, ReasoningLevel, validate_dialectic_query};
 use crate::types::message::{MessageCreate, MessageResponse, MessageSearchOptions};
 use crate::types::pagination::{self, Page};
 use crate::types::peer::Peer as PeerResponse;
@@ -380,7 +380,7 @@ impl Peer {
     /// Send a simple non-streaming dialectic chat query.
     ///
     /// Returns `Ok(None)` when the server response has no content.
-    /// Returns `Err(HonchoError::Validation)` when `query` is empty.
+    /// Returns `Err(HonchoError::Validation)` when `query` is empty or too long.
     ///
     /// # Examples
     ///
@@ -394,11 +394,7 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.inner.id.as_str())))]
     pub async fn chat(&self, query: &str) -> Result<Option<String>> {
-        if query.is_empty() {
-            return Err(HonchoError::Validation(
-                "query must not be empty".to_owned(),
-            ));
-        }
+        validate_dialectic_query(query)?;
         let body = crate::types::dialectic::DialecticOptions {
             query: query.to_owned(),
             session_id: None,
@@ -424,7 +420,7 @@ impl Peer {
     /// Send a dialectic chat query with full options (session, target, reasoning level).
     ///
     /// Returns `Ok(None)` when the server response has no content.
-    /// Returns `Err(HonchoError::Validation)` when the query in options is empty.
+    /// Returns `Err(HonchoError::Validation)` when the query in options is empty or too long.
     ///
     /// # Examples
     ///
@@ -441,11 +437,7 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, options), fields(peer_id = self.inner.id.as_str())))]
     pub async fn chat_with_options(&self, options: &DialecticOptions) -> Result<Option<String>> {
-        if options.query.is_empty() {
-            return Err(HonchoError::Validation(
-                "query must not be empty".to_owned(),
-            ));
-        }
+        options.validate()?;
         let resp: ChatResponse = self
             .inner
             .http
@@ -1024,17 +1016,13 @@ impl ChatStreamBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `HonchoError::Validation` if the query is empty.
+    /// Returns `HonchoError::Validation` if the query is empty or too long.
     /// Returns transport/API errors if the request fails.
     #[allow(clippy::type_complexity)]
     pub async fn send(
         self,
     ) -> Result<DialecticStream<Pin<Box<dyn Stream<Item = Result<String>> + Send>>>> {
-        if self.query.is_empty() {
-            return Err(HonchoError::Validation(
-                "query must not be empty".to_owned(),
-            ));
-        }
+        validate_dialectic_query(&self.query)?;
 
         let opts = DialecticOptions::builder()
             .query(self.query)

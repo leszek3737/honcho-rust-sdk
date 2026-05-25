@@ -8,7 +8,7 @@ use std::sync::Arc;
 use futures_util::Stream;
 use serde::de::DeserializeOwned;
 
-use crate::error::Result;
+use crate::error::{HonchoError, Result};
 use crate::http::client::HttpClient;
 
 type PageFetcher<TRaw> = Arc<
@@ -389,6 +389,8 @@ pub async fn paginate_post<T>(
 where
     T: DeserializeOwned + Clone + Send + 'static,
 {
+    validate_pagination(page, size)?;
+
     let page_str = page.to_string();
     let size_str = size.to_string();
     let rev_str;
@@ -422,4 +424,18 @@ where
             Ok(resp)
         })
     }))
+}
+
+pub(crate) fn validate_pagination(page: u64, size: u64) -> Result<()> {
+    if page == 0 {
+        return Err(HonchoError::Validation(
+            "page must be greater than or equal to 1".to_string(),
+        ));
+    }
+    if !(1..=100).contains(&size) {
+        return Err(HonchoError::Validation(
+            "size must be between 1 and 100".to_string(),
+        ));
+    }
+    Ok(())
 }

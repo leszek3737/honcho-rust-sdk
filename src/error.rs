@@ -160,6 +160,13 @@ impl HonchoError {
         }
     }
 
+    /// Returns whether the error matches the SDK retry policy.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Timeout { .. } | Self::Connection { .. })
+            || matches!(self.status_code(), Some(429 | 500 | 502 | 503 | 504))
+    }
+
     /// Returns the suggested wait time for rate-limited requests.
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {

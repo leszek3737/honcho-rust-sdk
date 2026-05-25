@@ -279,6 +279,72 @@ fn error_code_is_stable_string() {
     }
 }
 
+#[rstest]
+#[case(
+    HonchoError::RateLimit {
+        message: String::new(),
+        retry_after: None,
+    },
+    true
+)]
+#[case(
+    HonchoError::Server {
+        status: 500,
+        message: String::new(),
+    },
+    true
+)]
+#[case(
+    HonchoError::Server {
+        status: 502,
+        message: String::new(),
+    },
+    true
+)]
+#[case(
+    HonchoError::Server {
+        status: 503,
+        message: String::new(),
+    },
+    true
+)]
+#[case(
+    HonchoError::Server {
+        status: 504,
+        message: String::new(),
+    },
+    true
+)]
+#[case(
+    HonchoError::Server {
+        status: 501,
+        message: String::new(),
+    },
+    false
+)]
+#[case(
+    HonchoError::BadRequest {
+        message: String::new(),
+        body: None,
+    },
+    false
+)]
+#[case(
+    HonchoError::Timeout {
+        message: String::new(),
+    },
+    true
+)]
+#[case(
+    HonchoError::Connection {
+        message: String::new(),
+    },
+    true
+)]
+fn retryable_policy_matches_http_client(#[case] err: HonchoError, #[case] expected: bool) {
+    assert_eq!(err.is_retryable(), expected);
+}
+
 use std::error::Error;
 
 #[tokio::test]
@@ -290,6 +356,7 @@ async fn source_chain_for_transport_and_io_and_decode() {
         .unwrap_err()
         .into();
     assert!(transport_err.source().is_some());
+    assert!(!transport_err.is_retryable());
 
     let json_err = serde_json::from_str::<Vec<i32>>("{}").unwrap_err();
     let decode_err = HonchoError::Decode {

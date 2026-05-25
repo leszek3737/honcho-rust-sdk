@@ -8,6 +8,7 @@
 )]
 
 use honcho_ai::client::Honcho;
+use honcho_ai::error::HonchoError;
 use honcho_ai::types::dream::QueueStatus;
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -139,6 +140,21 @@ async fn schedule_dream_posts_correct_body() {
         .await;
 
     honcho.schedule_dream("alice", None, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn schedule_dream_rejects_empty_observer_before_request() {
+    let server = MockServer::start().await;
+    let honcho = make_honcho(&server, "ws1");
+
+    let err = honcho.schedule_dream("", None, None).await.unwrap_err();
+    assert!(matches!(
+        err,
+        HonchoError::Validation(ref message) if message == "observer must not be empty"
+    ));
+
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.is_empty(), "no request should be sent");
 }
 
 #[tokio::test]

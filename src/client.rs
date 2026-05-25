@@ -10,7 +10,7 @@ use tokio::sync::OnceCell;
 use url::Url;
 
 use crate::error::{HonchoError, Result};
-use crate::http::client::HttpClient;
+use crate::http::client::{HttpClient, normalize_base_url};
 use crate::http::routes;
 use crate::peer::Peer;
 use crate::session::{PeerSpec, Session};
@@ -92,15 +92,10 @@ impl Honcho {
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn new(base_url: &str, workspace_id: &str) -> Result<Self> {
-        if workspace_id.is_empty() {
-            return Err(HonchoError::Configuration(
-                "workspace_id must not be empty".into(),
-            ));
-        }
+        validate_workspace_id(workspace_id)?;
+        let url = normalize_base_url(base_url)?;
         let http =
-            HttpClient::from_params(HttpClient::builder().base_url(base_url.to_string()).build())?;
-        let url = Url::parse(base_url)
-            .map_err(|e| HonchoError::Configuration(format!("invalid base_url: {e}")))?;
+            HttpClient::from_params(HttpClient::builder().base_url(url.to_string()).build())?;
         Ok(Self {
             inner: Arc::new(Inner {
                 http,
@@ -154,18 +149,12 @@ impl Honcho {
             .or_else(|| std::env::var("HONCHO_WORKSPACE_ID").ok())
             .unwrap_or_else(|| "default".to_owned());
 
-        if resolved_workspace_id.is_empty() {
-            return Err(HonchoError::Configuration(
-                "workspace_id must not be empty".into(),
-            ));
-        }
-
-        let base_url = Url::parse(&resolved_base_url)
-            .map_err(|e| HonchoError::Configuration(format!("invalid base_url: {e}")))?;
+        validate_workspace_id(&resolved_workspace_id)?;
+        let base_url = normalize_base_url(&resolved_base_url)?;
 
         let http = HttpClient::from_params(
             HttpClient::builder()
-                .base_url(resolved_base_url)
+                .base_url(base_url.to_string())
                 .maybe_api_key(resolved_api_key)
                 .maybe_http_client(params.http_client)
                 .timeout(params.timeout.unwrap_or(Duration::from_secs(60)))
@@ -252,10 +241,15 @@ impl Honcho {
 
     /// Fetch workspace metadata from the server.
     pub async fn get_metadata(&self) -> Result<HashMap<String, Value>> {
+        let body = crate::types::workspace::WorkspaceCreate {
+            id: self.inner.workspace_id.clone(),
+            metadata: None,
+            configuration: None,
+        };
         let ws: Workspace = self
             .inner
             .http
-            .get(&routes::workspace(self.workspace_id())?, &[])
+            .post(&routes::workspaces(), Some(&body), &[])
             .await?;
         Ok(ws.metadata)
     }
@@ -282,10 +276,15 @@ impl Honcho {
     /// }
     /// ```
     pub async fn get_configuration(&self) -> Result<WorkspaceConfiguration> {
+        let body = crate::types::workspace::WorkspaceCreate {
+            id: self.inner.workspace_id.clone(),
+            metadata: None,
+            configuration: None,
+        };
         let ws: Workspace = self
             .inner
             .http
-            .get(&routes::workspace(self.workspace_id())?, &[])
+            .post(&routes::workspaces(), Some(&body), &[])
             .await?;
         Ok(ws.configuration)
     }
@@ -320,10 +319,15 @@ impl Honcho {
     /// Use this when the server returns fields not yet represented in
     /// [`WorkspaceConfiguration`].
     pub async fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
+        let body = crate::types::workspace::WorkspaceCreate {
+            id: self.inner.workspace_id.clone(),
+            metadata: None,
+            configuration: None,
+        };
         let raw: serde_json::Value = self
             .inner
             .http
-            .get(&routes::workspace(self.workspace_id())?, &[])
+            .post(&routes::workspaces(), Some(&body), &[])
             .await?;
         match raw.get("configuration") {
             Some(serde_json::Value::Object(map)) => {
@@ -557,6 +561,11 @@ impl Honcho {
         session_id: Option<&str>,
         observed_peer: Option<&str>,
     ) -> Result<()> {
+        if observer.is_empty() {
+            return Err(HonchoError::Validation(
+                "observer must not be empty".to_string(),
+            ));
+        }
         self.ensure_workspace().await?;
         let observed_peer = observed_peer.unwrap_or(observer);
         let body = crate::types::dream::ScheduleDreamRequest {
@@ -755,4 +764,29 @@ impl Honcho {
         .await?;
         Ok(page.map(|ws| ws.id))
     }
+}
+
+fn validate_workspace_id(workspace_id: &str) -> Result<()> {
+    if workspace_id.is_empty() {
+        return Err(HonchoError::Configuration(
+            "workspace_id must not be empty".into(),
+        ));
+    }
+
+    if workspace_id.len() > 512 {
+        return Err(HonchoError::Configuration(
+            "workspace_id must be at most 512 characters".into(),
+        ));
+    }
+
+    if !workspace_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err(HonchoError::Configuration(
+            "workspace_id must match [a-zA-Z0-9_-]+".into(),
+        ));
+    }
+
+    Ok(())
 }

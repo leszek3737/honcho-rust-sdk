@@ -10,6 +10,9 @@ use tokio::io::AsyncRead;
 /// Construct with [`FileSource::bytes`], [`FileSource::path`], or
 /// [`FileSource::stream`], or convert from [`PathBuf`]/[`std::path::Path`] via the
 /// `From` impls.
+///
+/// The API currently accepts `text/plain`, `application/pdf`, and
+/// `application/json`; other MIME types may be rejected by the server.
 pub enum FileSource {
     /// Raw bytes with explicit filename and content type.
     Bytes {
@@ -62,6 +65,9 @@ impl std::fmt::Debug for FileSource {
 
 impl FileSource {
     /// Create a `Bytes` variant from explicit parts.
+    ///
+    /// The API currently accepts `text/plain`, `application/pdf`, and
+    /// `application/json`; other MIME types may be rejected by the server.
     pub fn bytes(
         filename: impl Into<String>,
         data: impl Into<Vec<u8>>,
@@ -87,6 +93,9 @@ impl FileSource {
     ///
     /// For files on disk, prefer [`FileSource::path`] which streams from the
     /// filesystem without buffering.
+    ///
+    /// The API currently accepts `text/plain`, `application/pdf`, and
+    /// `application/json`; other MIME types may be rejected by the server.
     ///
     /// # Examples
     ///

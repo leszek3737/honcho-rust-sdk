@@ -322,6 +322,25 @@ async fn peer_chat_with_session_and_target() {
     assert_eq!(result, Some("Bob likes Rust".to_owned()));
 }
 
+#[tokio::test]
+async fn peer_chat_with_options_rejects_long_query_without_request() {
+    let server = MockServer::start().await;
+    let peer = make_peer(&server).await;
+
+    use honcho_ai::types::dialectic::DialecticOptions;
+    let options = DialecticOptions::builder()
+        .query("a".repeat(10_001))
+        .stream(false)
+        .build();
+
+    let err = peer.chat_with_options(&options).await.unwrap_err();
+    assert_eq!(err.code(), "validation_error");
+    assert_eq!(err.message(), "query must be at most 10000 characters");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+}
+
 // ── F5.4: Card ────────────────────────────────────────────────────────
 
 #[tokio::test]
