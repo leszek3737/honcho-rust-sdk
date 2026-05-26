@@ -12,6 +12,13 @@ keywords = ["honcho", "ai", "memory", "agents"]
 categories = ["api-bindings", "asynchronous"]
 readme = "README.md"
 exclude = [
+    ".claude/**",
+    ".github/**",
+    ".openapi-inventory.md",
+    ".serena/**",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Cargo.toml.orig",
     "tests/fixtures/parity/**",
 ]
 
