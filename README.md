@@ -240,8 +240,6 @@ These APIs have no equivalent in the Python/TypeScript SDKs:
 | Conclusions                | ✓      | ✓    |
 | File upload                | ✓      | ✓    |
 | Context (OpenAI/Anthropic) | ✓      | ✓    |
-| Blocking API               | ✗      | ✓    |
-| Webhooks                   | ✓      | ✗    |
 | API keys                   | ✓      | ✓    |
 
 
