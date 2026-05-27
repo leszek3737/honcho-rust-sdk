@@ -218,6 +218,13 @@ impl Session {
         block_on(self.inner.context_with_options(options))
     }
 
+    /// Get a context builder for fine-grained control over session context parameters.
+    pub fn context_builder(&self) -> BlockingSessionContextBuilder {
+        BlockingSessionContextBuilder {
+            inner: self.inner.context_builder(),
+        }
+    }
+
     /// Get available summaries.
     pub fn summaries(&self) -> Result<crate::types::session::SessionSummaries> {
         block_on(self.inner.summaries())
@@ -473,5 +480,80 @@ impl Session {
         BlockingSessionRepresentationBuilder {
             inner: self.inner.representation_builder(peer_id.into()),
         }
+    }
+}
+
+/// Blocking builder for session context queries.
+///
+/// Wraps the async `SessionContextBuilder`.
+#[must_use]
+pub struct BlockingSessionContextBuilder {
+    inner: crate::session::SessionContextBuilder,
+}
+
+impl BlockingSessionContextBuilder {
+    /// Whether to include summaries (default: `true`).
+    pub fn summary(mut self, val: bool) -> Self {
+        self.inner = self.inner.summary(val);
+        self
+    }
+
+    /// Limit context to this session only (default: `false`).
+    pub fn limit_to_session(mut self, val: bool) -> Self {
+        self.inner = self.inner.limit_to_session(val);
+        self
+    }
+
+    /// Maximum number of tokens for the context.
+    pub fn tokens(mut self, val: u32) -> Self {
+        self.inner = self.inner.tokens(val);
+        self
+    }
+
+    /// Target peer for perspective-based context.
+    pub fn peer_target(mut self, val: impl Into<String>) -> Self {
+        self.inner = self.inner.peer_target(val);
+        self
+    }
+
+    /// Perspective peer for viewing context.
+    pub fn peer_perspective(mut self, val: impl Into<String>) -> Self {
+        self.inner = self.inner.peer_perspective(val);
+        self
+    }
+
+    /// Semantic search query to filter relevant conclusions.
+    pub fn search_query(mut self, val: impl Into<String>) -> Self {
+        self.inner = self.inner.search_query(val);
+        self
+    }
+
+    /// Number of semantic-search-retrieved conclusions (1–100).
+    pub fn search_top_k(mut self, k: u32) -> Self {
+        self.inner = self.inner.search_top_k(k);
+        self
+    }
+
+    /// Maximum distance for semantically relevant conclusions (0.0–1.0).
+    pub fn search_max_distance(mut self, d: f64) -> Self {
+        self.inner = self.inner.search_max_distance(d);
+        self
+    }
+
+    /// Include the most frequent conclusions.
+    pub fn include_most_frequent(mut self, v: bool) -> Self {
+        self.inner = self.inner.include_most_frequent(v);
+        self
+    }
+
+    /// Maximum number of conclusions to include (1–100).
+    pub fn max_conclusions(mut self, m: u32) -> Self {
+        self.inner = self.inner.max_conclusions(m);
+        self
+    }
+
+    /// Execute the request and return the session context.
+    pub fn send(self) -> Result<crate::types::session::SessionContext> {
+        block_on(self.inner.send())
     }
 }

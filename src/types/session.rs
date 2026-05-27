@@ -170,12 +170,12 @@ pub struct SessionContextOptions {
     pub max_conclusions: Option<u32>,
 }
 
-const SEARCH_TOP_K_MIN: u32 = 1;
-const SEARCH_TOP_K_MAX: u32 = 100;
-const SEARCH_MAX_DISTANCE_MIN: f64 = 0.0;
-const SEARCH_MAX_DISTANCE_MAX: f64 = 1.0;
-const MAX_CONCLUSIONS_MIN: u32 = 1;
-const MAX_CONCLUSIONS_MAX: u32 = 100;
+pub(crate) const SEARCH_TOP_K_MIN: u32 = 1;
+pub(crate) const SEARCH_TOP_K_MAX: u32 = 100;
+pub(crate) const SEARCH_MAX_DISTANCE_MIN: f64 = 0.0;
+pub(crate) const SEARCH_MAX_DISTANCE_MAX: f64 = 1.0;
+pub(crate) const MAX_CONCLUSIONS_MIN: u32 = 1;
+pub(crate) const MAX_CONCLUSIONS_MAX: u32 = 100;
 
 impl SessionContextOptions {
     /// Validate cross-field constraints.
@@ -210,6 +210,13 @@ impl SessionContextOptions {
             return Err(crate::error::HonchoError::Validation(format!(
                 "max_conclusions must be between {MAX_CONCLUSIONS_MIN} and {MAX_CONCLUSIONS_MAX}"
             )));
+        }
+        if let Some(t) = self.tokens
+            && t == 0
+        {
+            return Err(crate::error::HonchoError::Validation(
+                "tokens must be greater than 0".into(),
+            ));
         }
         Ok(())
     }
