@@ -203,6 +203,52 @@ async fn blocking_session_context_with_options() {
     assert_eq!(ctx.id, "sess1");
 }
 
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_session_context_builder() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1/context"))
+        .and(query_param("summary", "false"))
+        .and(query_param("limit_to_session", "true"))
+        .and(query_param("tokens", "4096"))
+        .and(query_param("peer_target", "bob"))
+        .and(query_param("peer_perspective", "alice"))
+        .and(query_param("search_query", "preferences"))
+        .and(query_param("search_top_k", "10"))
+        .and(query_param("search_max_distance", "0.5"))
+        .and(query_param("include_most_frequent", "true"))
+        .and(query_param("max_conclusions", "20"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(context_json()))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let ctx = blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        session
+            .context_builder()
+            .summary(false)
+            .limit_to_session(true)
+            .tokens(4096)
+            .peer_target("bob")
+            .peer_perspective("alice")
+            .search_query("preferences")
+            .search_top_k(10)
+            .search_max_distance(0.5)
+            .include_most_frequent(true)
+            .max_conclusions(20)
+            .send()
+            .unwrap()
+    });
+    assert_eq!(ctx.id, "sess1");
+    assert_eq!(ctx.messages.len(), 1);
+}
+
 // ─── Session: summaries ──────────────────────────────────────────────
 
 #[cfg(feature = "blocking")]

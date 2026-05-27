@@ -211,6 +211,13 @@ impl SessionContextOptions {
                 "max_conclusions must be between {MAX_CONCLUSIONS_MIN} and {MAX_CONCLUSIONS_MAX}"
             )));
         }
+        if let Some(t) = self.tokens
+            && t == 0
+        {
+            return Err(crate::error::HonchoError::Validation(
+                "tokens must be greater than 0".into(),
+            ));
+        }
         Ok(())
     }
 }

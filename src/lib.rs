@@ -49,7 +49,7 @@ pub use conclusion::{Conclusion, ConclusionCreateParams, ConclusionScope};
 pub use dialectic_stream::{DialecticStream, FinalResponse};
 pub use message::Message;
 pub use peer::Peer;
-pub use session::{Session, UploadFileBuilder};
+pub use session::{Session, SessionContextBuilder, UploadFileBuilder};
 pub use upload::FileSource;
 
 pub use types::dialectic::DialecticOptions;

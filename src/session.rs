@@ -1088,12 +1088,7 @@ impl Session {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(session_id = self.inner.id.as_str())))]
     pub async fn context(&self) -> Result<crate::types::session::SessionContext> {
-        let opts = crate::types::session::SessionContextOptions::builder()
-            .summary(true)
-            .limit_to_session(false)
-            .build();
-        opts.validate()?;
-        self.context_with_options(&opts).await
+        self.context_builder().send().await
     }
 
     /// Get the session context with custom parameters.
@@ -1159,6 +1154,41 @@ impl Session {
         }
         let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
         self.inner.http.get(&route, &refs).await
+    }
+
+    /// Get a context builder for fine-grained control over session context parameters.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(session: &honcho_ai::Session) -> honcho_ai::error::Result<()> {
+    /// let ctx = session.context_builder()
+    ///     .summary(true)
+    ///     .peer_target("alice")
+    ///     .search_query("preferences")
+    ///     .search_top_k(10)
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn context_builder(&self) -> SessionContextBuilder {
+        SessionContextBuilder {
+            http: self.inner.http.clone(),
+            workspace_id: self.inner.workspace_id.clone(),
+            session_id: self.inner.id.clone(),
+            summary: true,
+            limit_to_session: false,
+            tokens: None,
+            peer_target: None,
+            peer_perspective: None,
+            search_query: None,
+            search_top_k: None,
+            search_max_distance: None,
+            include_most_frequent: None,
+            max_conclusions: None,
+        }
     }
 
     // ── F6.8: Summaries ─────────────────────────────────────────────────
@@ -1483,6 +1513,207 @@ impl SessionRepresentationBuilder {
         let resp: crate::types::dialectic::RepresentationResponse =
             self.http.post(&route, Some(&params), &[]).await?;
         Ok(resp.representation)
+    }
+}
+
+/// Builder for fine-grained session context requests.
+///
+/// Created via [`Session::context_builder()`].
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn example(session: &honcho_ai::Session) -> honcho_ai::error::Result<()> {
+/// let ctx = session.context_builder()
+///     .summary(true)
+///     .peer_target("alice")
+///     .search_query("preferences")
+///     .search_top_k(10)
+///     .send()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct SessionContextBuilder {
+    http: HttpClient,
+    workspace_id: String,
+    session_id: String,
+    summary: bool,
+    limit_to_session: bool,
+    tokens: Option<u32>,
+    peer_target: Option<String>,
+    peer_perspective: Option<String>,
+    search_query: Option<String>,
+    search_top_k: Option<u32>,
+    search_max_distance: Option<f64>,
+    include_most_frequent: Option<bool>,
+    max_conclusions: Option<u32>,
+}
+
+impl SessionContextBuilder {
+    /// Whether to include summaries (default: `true`).
+    #[must_use]
+    pub fn summary(mut self, val: bool) -> Self {
+        self.summary = val;
+        self
+    }
+
+    /// Limit context to this session only (default: `false`).
+    #[must_use]
+    pub fn limit_to_session(mut self, val: bool) -> Self {
+        self.limit_to_session = val;
+        self
+    }
+
+    /// Maximum number of tokens for the context.
+    #[must_use]
+    pub fn tokens(mut self, val: u32) -> Self {
+        self.tokens = Some(val);
+        self
+    }
+
+    /// Target peer for perspective-based context.
+    #[must_use]
+    pub fn peer_target(mut self, val: impl Into<String>) -> Self {
+        self.peer_target = Some(val.into());
+        self
+    }
+
+    /// Perspective peer for viewing context.
+    #[must_use]
+    pub fn peer_perspective(mut self, val: impl Into<String>) -> Self {
+        self.peer_perspective = Some(val.into());
+        self
+    }
+
+    /// Semantic search query to filter relevant conclusions.
+    #[must_use]
+    pub fn search_query(mut self, val: impl Into<String>) -> Self {
+        self.search_query = Some(val.into());
+        self
+    }
+
+    /// Number of semantic-search-retrieved conclusions (1–100).
+    #[must_use]
+    pub fn search_top_k(mut self, val: u32) -> Self {
+        self.search_top_k = Some(val);
+        self
+    }
+
+    /// Maximum distance for semantically relevant conclusions (0.0–1.0).
+    #[must_use]
+    pub fn search_max_distance(mut self, val: f64) -> Self {
+        self.search_max_distance = Some(val);
+        self
+    }
+
+    /// Whether to include the most frequent conclusions.
+    #[must_use]
+    pub fn include_most_frequent(mut self, val: bool) -> Self {
+        self.include_most_frequent = Some(val);
+        self
+    }
+
+    /// Maximum number of conclusions to include (1–100).
+    #[must_use]
+    pub fn max_conclusions(mut self, val: u32) -> Self {
+        self.max_conclusions = Some(val);
+        self
+    }
+
+    /// Send the context request with the configured parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns `HonchoError::Validation` if `search_top_k`, `search_max_distance`,
+    /// or `max_conclusions` are out of range, if `peer_perspective` is set without
+    /// `peer_target`, or if `search_query` is set without `peer_target`.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(session_id = self.session_id.as_str())))]
+    pub async fn send(self) -> Result<crate::types::session::SessionContext> {
+        if self.peer_perspective.is_some() && self.peer_target.is_none() {
+            return Err(HonchoError::Validation(
+                "peer_perspective requires peer_target to be set".into(),
+            ));
+        }
+        if self.search_query.is_some() && self.peer_target.is_none() {
+            return Err(HonchoError::Validation(
+                "search_query requires peer_target to be set".into(),
+            ));
+        }
+        if let Some(k) = self.search_top_k
+            && !(1..=100).contains(&k)
+        {
+            return Err(HonchoError::Validation(format!(
+                "search_top_k must be between 1 and 100, got {k}"
+            )));
+        }
+        if let Some(d) = self.search_max_distance
+            && !(0.0..=1.0).contains(&d)
+        {
+            return Err(HonchoError::Validation(format!(
+                "search_max_distance must be between 0.0 and 1.0, got {d}"
+            )));
+        }
+        if let Some(c) = self.max_conclusions
+            && !(1..=100).contains(&c)
+        {
+            return Err(HonchoError::Validation(format!(
+                "max_conclusions must be between 1 and 100, got {c}"
+            )));
+        }
+        if let Some(t) = self.tokens
+            && t == 0
+        {
+            return Err(HonchoError::Validation(
+                "tokens must be greater than 0".into(),
+            ));
+        }
+
+        let route = routes::session_context(&self.workspace_id, &self.session_id)?;
+        let mut params: Vec<(&str, String)> = vec![
+            (
+                "summary",
+                if self.summary { "true" } else { "false" }.to_string(),
+            ),
+            (
+                "limit_to_session",
+                if self.limit_to_session {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_string(),
+            ),
+        ];
+        if let Some(v) = self.tokens {
+            params.push(("tokens", v.to_string()));
+        }
+        if let Some(ref v) = self.peer_target {
+            params.push(("peer_target", v.clone()));
+        }
+        if let Some(ref v) = self.peer_perspective {
+            params.push(("peer_perspective", v.clone()));
+        }
+        if let Some(ref v) = self.search_query {
+            params.push(("search_query", v.clone()));
+        }
+        if let Some(v) = self.search_top_k {
+            params.push(("search_top_k", v.to_string()));
+        }
+        if let Some(v) = self.search_max_distance {
+            params.push(("search_max_distance", v.to_string()));
+        }
+        if let Some(v) = self.include_most_frequent {
+            params.push((
+                "include_most_frequent",
+                if v { "true" } else { "false" }.to_string(),
+            ));
+        }
+        if let Some(v) = self.max_conclusions {
+            params.push(("max_conclusions", v.to_string()));
+        }
+        let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.http.get(&route, &refs).await
     }
 }
 
