@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.4] - 2026-05-27
+
+### Added
+
+- `SessionContextBuilder` (async) and `BlockingSessionContextBuilder` (blocking) to provide a builder pattern for fine-grained session context queries.
+- Extensive client-side validation for session context builders (including range checks, `tokens > 0`, and cross-parameter validation).
+
+### Changed
+
+- `Session::context()` now utilizes `SessionContextBuilder` under the hood.
+
+### Fixed
+
+- Added missing validation for `tokens > 0` on `SessionContextOptions` and `SessionContextBuilder`.
+
 ## [0.1.2] - 2026-05-25
 
 ### Added

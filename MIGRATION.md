@@ -1,5 +1,36 @@
 # Migration Guide
 
+## 0.1.2 → 0.1.4
+
+### New: `Session::context_builder()` for fine-grained Session Context
+
+The SDK now provides [`SessionContextBuilder`](crate::SessionContextBuilder) (and [`BlockingSessionContextBuilder`](crate::blocking::BlockingSessionContextBuilder)) to easily build session context queries, matching the existing `Peer::context_builder()` pattern.
+
+**Before (using options):**
+```rust
+use honcho_ai::types::session::SessionContextOptions;
+
+let opts = SessionContextOptions::builder()
+    .summary(true)
+    .peer_target("alice")
+    .peer_perspective("bob")
+    .build();
+opts.validate()?;
+let ctx = session.context_with_options(&opts).await?;
+```
+
+**After (using builder):**
+```rust
+let ctx = session.context_builder()
+    .summary(true)
+    .peer_target("alice")
+    .peer_perspective("bob")
+    .send()
+    .await?;
+```
+
+The new builder automatically validates parameters on `.send().await?` and provides a cleaner, more fluent API.
+
 ## 0.1.0 → 0.1.1
 
 ### R-27: `DialecticStream::final_response` returns `FinalResponse`
