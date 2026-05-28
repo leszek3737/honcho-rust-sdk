@@ -3,7 +3,6 @@
 //! Maps the `OpenAPI` schemas: `Conclusion`, `ConclusionCreate`,
 //! `ConclusionBatchCreate`, `ConclusionGet`, `ConclusionQuery`, `Page[Conclusion]`.
 
-use crate::types::common::JsonValue;
 use crate::types::pagination::Page;
 
 use chrono::{DateTime, Utc};
@@ -60,6 +59,23 @@ pub struct ConclusionBatchCreate {
     pub conclusions: Vec<ConclusionCreate>,
 }
 
+/// Typed filters for conclusion list and query requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
+#[builder(on(String, into))]
+#[builder(finish_fn = build)]
+#[non_exhaustive]
+pub struct ConclusionFilters {
+    /// Filter by observer peer ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observer_id: Option<String>,
+    /// Filter by observed peer ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_id: Option<String>,
+    /// Optional session ID filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
 /// Request body for listing conclusions with optional filters.
 ///
 /// Maps `OpenAPI` `ConclusionGet`.
@@ -69,7 +85,7 @@ pub struct ConclusionBatchCreate {
 pub struct ConclusionGet {
     /// Optional metadata filters.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub filters: Option<JsonValue>,
+    pub filters: Option<ConclusionFilters>,
 }
 
 /// Request body for semantic search over conclusions.
@@ -90,7 +106,7 @@ pub struct ConclusionQuery {
     pub distance: Option<f64>,
     /// Additional metadata filters.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub filters: Option<JsonValue>,
+    pub filters: Option<ConclusionFilters>,
 }
 
 fn default_top_k() -> u32 {

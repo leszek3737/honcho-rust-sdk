@@ -12,6 +12,7 @@ use crate::http::routes;
 use crate::types::conclusion::Conclusion as ConclusionData;
 use crate::types::conclusion::ConclusionPage;
 use crate::types::conclusion::{ConclusionBatchCreate, ConclusionCreate};
+use crate::types::conclusion::{ConclusionFilters, ConclusionGet, ConclusionQuery};
 use crate::types::dialectic::RepresentationResponse;
 use crate::types::pagination::paginate_post;
 
@@ -690,14 +691,19 @@ impl ListConclusionsBuilder {
     /// # }
     /// ```
     pub async fn send(self) -> Result<ConclusionPage> {
-        let mut filters = serde_json::json!({
-            "observer_id": self.scope.inner.observer,
-            "observed_id": self.scope.inner.observed,
-        });
-        if let Some(ref sid) = self.session_id {
-            filters["session_id"] = serde_json::Value::String(sid.clone());
-        }
-        let body = serde_json::json!({"filters": filters});
+        let body = ConclusionGet::builder()
+            .filters(
+                ConclusionFilters::builder()
+                    .observer_id(self.scope.inner.observer.clone())
+                    .observed_id(self.scope.inner.observed.clone())
+                    .maybe_session_id(self.session_id)
+                    .build(),
+            )
+            .build();
+        let body = serde_json::to_value(&body).map_err(|e| HonchoError::Decode {
+            path: "ConclusionGet".to_owned(),
+            source: e,
+        })?;
         let route = routes::conclusions_list(&self.scope.inner.workspace_id)?;
         paginate_post(
             &self.scope.inner.http,
@@ -781,18 +787,21 @@ impl QueryConclusionsBuilder {
                 "distance must be between 0.0 and 1.0, got {d}"
             )));
         }
-        let filters = serde_json::json!({
-            "observer_id": self.scope.inner.observer,
-            "observed_id": self.scope.inner.observed,
-        });
-        let mut body = serde_json::json!({
-            "query": self.query,
-            "top_k": self.top_k,
-            "filters": filters,
-        });
-        if let Some(d) = self.distance {
-            body["distance"] = serde_json::Value::from(d);
-        }
+        let body = ConclusionQuery::builder()
+            .query(self.query)
+            .top_k(self.top_k)
+            .maybe_distance(self.distance)
+            .filters(
+                ConclusionFilters::builder()
+                    .observer_id(self.scope.inner.observer.clone())
+                    .observed_id(self.scope.inner.observed.clone())
+                    .build(),
+            )
+            .build();
+        let body = serde_json::to_value(&body).map_err(|e| HonchoError::Decode {
+            path: "ConclusionQuery".to_owned(),
+            source: e,
+        })?;
         let route = routes::conclusions_query(&self.scope.inner.workspace_id)?;
         let data: Vec<ConclusionData> =
             self.scope.inner.http.post(&route, Some(&body), &[]).await?;
@@ -1249,7 +1258,6 @@ mod tests {
 
         let expected_body = serde_json::json!({
             "query": "preferences",
-            "top_k": 10,
             "filters": {
                 "observer_id": "alice",
                 "observed_id": "bob",
@@ -1403,7 +1411,6 @@ mod tests {
         // Step 3: Query
         let query_body = serde_json::json!({
             "query": "preferences",
-            "top_k": 10,
             "filters": {
                 "observer_id": "alice",
                 "observed_id": "bob",

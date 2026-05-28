@@ -49,6 +49,27 @@ pub struct SessionCreate {
     pub configuration: Option<SessionConfiguration>,
 }
 
+impl SessionCreate {
+    /// Validate session ID constraints.
+    pub fn validate(&self) -> std::result::Result<(), crate::error::HonchoError> {
+        if self.id.is_empty() {
+            return Err(crate::error::HonchoError::Validation(
+                "session id must not be empty".into(),
+            ));
+        }
+        if !self
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(crate::error::HonchoError::Validation(
+                "session id must contain only [a-zA-Z0-9_-]".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Request body for updating a session.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
@@ -349,6 +370,42 @@ impl IntoAssistantRef for &crate::Peer {
 }
 
 impl SessionContext {
+    /// Format a peer card into a single displayable string.
+    fn format_peer_card(card: &[String]) -> String {
+        let items: Vec<String> = card
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "\\'")))
+            .collect();
+        format!("[{}]", items.join(", "))
+    }
+
+    /// Build context system messages shared across provider formats.
+    ///
+    /// Returns `(content_tag, content_value)` pairs for `peer_representation`,
+    /// `peer_card`, and `summary`, in that order.
+    fn build_context_messages(&self) -> Vec<(&'static str, std::borrow::Cow<'_, str>)> {
+        let mut msgs = Vec::new();
+        if let Some(ref rep) = self.peer_representation {
+            msgs.push((
+                "peer_representation",
+                std::borrow::Cow::Borrowed(rep.as_str()),
+            ));
+        }
+        if let Some(ref card) = self.peer_card {
+            msgs.push((
+                "peer_card",
+                std::borrow::Cow::Owned(Self::format_peer_card(card)),
+            ));
+        }
+        if let Some(ref summary) = self.summary {
+            msgs.push((
+                "summary",
+                std::borrow::Cow::Borrowed(summary.content.as_str()),
+            ));
+        }
+        msgs
+    }
+
     /// Convert the context to OpenAI-compatible message format.
     ///
     /// System messages (`peer_representation`, `peer_card`, summary) are prepended.
@@ -372,24 +429,10 @@ impl SessionContext {
         let assistant = assistant.as_assistant_name();
         let mut result: Vec<serde_json::Value> = Vec::new();
 
-        if let Some(ref rep) = self.peer_representation {
+        for (tag, value) in self.build_context_messages() {
             result.push(serde_json::json!({
                 "role": "system",
-                "content": format!("<peer_representation>{rep}</peer_representation>"),
-            }));
-        }
-
-        if let Some(ref card) = self.peer_card {
-            result.push(serde_json::json!({
-                "role": "system",
-                "content": format!("<peer_card>[{}]</peer_card>", card.iter().map(|s| format!("'{}'", s.replace('\'', "\\'"))).collect::<Vec<_>>().join(", ")),
-            }));
-        }
-
-        if let Some(ref summary) = self.summary {
-            result.push(serde_json::json!({
-                "role": "system",
-                "content": format!("<summary>{}</summary>", summary.content),
+                "content": format!("<{tag}>{value}</{tag}>"),
             }));
         }
 
@@ -426,24 +469,10 @@ impl SessionContext {
         let assistant = assistant.as_assistant_name();
         let mut result: Vec<serde_json::Value> = Vec::new();
 
-        if let Some(ref rep) = self.peer_representation {
+        for (tag, value) in self.build_context_messages() {
             result.push(serde_json::json!({
                 "role": "user",
-                "content": format!("<peer_representation>{rep}</peer_representation>"),
-            }));
-        }
-
-        if let Some(ref card) = self.peer_card {
-            result.push(serde_json::json!({
-                "role": "user",
-                "content": format!("<peer_card>[{}]</peer_card>", card.iter().map(|s| format!("'{}'", s.replace('\'', "\\'"))).collect::<Vec<_>>().join(", ")),
-            }));
-        }
-
-        if let Some(ref summary) = self.summary {
-            result.push(serde_json::json!({
-                "role": "user",
-                "content": format!("<summary>{}</summary>", summary.content),
+                "content": format!("<{tag}>{value}</{tag}>"),
             }));
         }
 

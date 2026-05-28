@@ -23,6 +23,11 @@ use crate::upload::FileSource;
 
 pub(crate) struct SessionInner {
     http: HttpClient,
+    // PERF: workspace_id is cloned per Message/Peer/Session creation (~11 call sites).
+    // Switching to Arc<str> would eliminate String clones but ripples through Honcho,
+    // Peer, Session, Message, Conclusion, and all builder types. The current cost is
+    // negligible for typical workloads (<100 messages). Revisit if profiling shows
+    // allocation pressure in hot loops (e.g., bulk message import).
     workspace_id: String,
     id: String,
     is_active: AtomicBool,
@@ -116,6 +121,43 @@ pub struct UploadFileBuilder<'a> {
     created_at: Option<DateTime<Utc>>,
 }
 
+fn serialize_upload_fields(
+    builder: &UploadFileBuilder<'_>,
+) -> Result<impl Fn(Form) -> Form + Clone + Send + 'static> {
+    let metadata_text = builder
+        .metadata
+        .as_ref()
+        .map(|md| {
+            serde_json::to_string(md)
+                .map_err(|e| HonchoError::Configuration(format!("metadata: {e}")))
+        })
+        .transpose()?;
+
+    let configuration_text = builder
+        .configuration
+        .as_ref()
+        .map(|cfg| {
+            serde_json::to_string(cfg)
+                .map_err(|e| HonchoError::Configuration(format!("configuration: {e}")))
+        })
+        .transpose()?;
+
+    let created_at_text = builder.created_at.map(|dt| dt.to_rfc3339());
+
+    Ok(move |mut form: Form| -> Form {
+        if let Some(ref md) = metadata_text {
+            form = form.text("metadata", md.clone());
+        }
+        if let Some(ref cfg) = configuration_text {
+            form = form.text("configuration", cfg.clone());
+        }
+        if let Some(ref dt) = created_at_text {
+            form = form.text("created_at", dt.clone());
+        }
+        form
+    })
+}
+
 impl UploadFileBuilder<'_> {
     /// Set the peer that owns the uploaded file (required).
     ///
@@ -202,48 +244,21 @@ impl UploadFileBuilder<'_> {
         feature = "tracing",
         tracing::instrument(skip(self), name = "upload_file_send")
     )]
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::missing_panics_doc)]
     pub async fn send(self) -> Result<Vec<crate::Message>> {
-        let peer_id = self
-            .peer_id
-            .ok_or_else(|| HonchoError::Validation("peer_id is required".into()))?;
+        if self.peer_id.is_none() {
+            return Err(HonchoError::Validation("peer_id is required".into()));
+        }
+        if self.source.is_none() {
+            return Err(HonchoError::Validation("file source is required".into()));
+        }
 
-        let source = self
-            .source
-            .ok_or_else(|| HonchoError::Validation("file source is required".into()))?;
+        let add_text_fields = serialize_upload_fields(&self)?;
 
-        let metadata_text = self
-            .metadata
-            .as_ref()
-            .map(|md| {
-                serde_json::to_string(md)
-                    .map_err(|e| HonchoError::Configuration(format!("metadata: {e}")))
-            })
-            .transpose()?;
-
-        let configuration_text = self
-            .configuration
-            .as_ref()
-            .map(|cfg| {
-                serde_json::to_string(cfg)
-                    .map_err(|e| HonchoError::Configuration(format!("configuration: {e}")))
-            })
-            .transpose()?;
-
-        let created_at_text = self.created_at.map(|dt| dt.to_rfc3339());
-
-        let add_text_fields = move |mut form: Form| -> Form {
-            if let Some(ref md) = metadata_text {
-                form = form.text("metadata", md.clone());
-            }
-            if let Some(ref cfg) = configuration_text {
-                form = form.text("configuration", cfg.clone());
-            }
-            if let Some(ref dt) = created_at_text {
-                form = form.text("created_at", dt.clone());
-            }
-            form
-        };
+        #[allow(clippy::expect_used)]
+        let peer_id = self.peer_id.expect("peer_id validated above");
+        #[allow(clippy::expect_used)]
+        let source = self.source.expect("source validated above");
 
         // FileSource::Path — Part::file() streams from disk, re-opens on retry.
         // FileSource::Stream — must buffer: AsyncRead consumed once, not replayable.

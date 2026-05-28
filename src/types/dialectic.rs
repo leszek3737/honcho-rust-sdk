@@ -79,6 +79,17 @@ pub fn validate_dialectic_query(query: &str) -> Result<()> {
 
 impl DialecticOptions {
     /// Validate options before sending them to the API.
+    ///
+    /// This is a separate method (not part of the builder's `build()`) because
+    /// `bon::Builder` with `finish_fn = build` does not support fallible finish.
+    /// Call this after `.build()` and before passing the options to the API:
+    ///
+    /// ```ignore
+    /// let opts = DialecticOptions::builder()
+    ///     .query("hello")
+    ///     .build()
+    ///     .validate()?;
+    /// ```
     pub fn validate(&self) -> Result<()> {
         validate_dialectic_query(&self.query)
     }
