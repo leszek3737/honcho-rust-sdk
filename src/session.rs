@@ -244,16 +244,21 @@ impl UploadFileBuilder<'_> {
         feature = "tracing",
         tracing::instrument(skip(self), name = "upload_file_send")
     )]
+    #[allow(clippy::missing_panics_doc)]
     pub async fn send(self) -> Result<Vec<crate::Message>> {
+        if self.peer_id.is_none() {
+            return Err(HonchoError::Validation("peer_id is required".into()));
+        }
+        if self.source.is_none() {
+            return Err(HonchoError::Validation("file source is required".into()));
+        }
+
         let add_text_fields = serialize_upload_fields(&self)?;
 
-        let peer_id = self
-            .peer_id
-            .ok_or_else(|| HonchoError::Validation("peer_id is required".into()))?;
-
-        let source = self
-            .source
-            .ok_or_else(|| HonchoError::Validation("file source is required".into()))?;
+        #[allow(clippy::expect_used)]
+        let peer_id = self.peer_id.expect("peer_id validated above");
+        #[allow(clippy::expect_used)]
+        let source = self.source.expect("source validated above");
 
         // FileSource::Path — Part::file() streams from disk, re-opens on retry.
         // FileSource::Stream — must buffer: AsyncRead consumed once, not replayable.

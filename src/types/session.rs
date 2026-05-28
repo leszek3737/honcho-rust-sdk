@@ -383,16 +383,25 @@ impl SessionContext {
     ///
     /// Returns `(content_tag, content_value)` pairs for `peer_representation`,
     /// `peer_card`, and `summary`, in that order.
-    fn build_context_messages(&self) -> Vec<(&'static str, String)> {
+    fn build_context_messages(&self) -> Vec<(&'static str, std::borrow::Cow<'_, str>)> {
         let mut msgs = Vec::new();
         if let Some(ref rep) = self.peer_representation {
-            msgs.push(("peer_representation", rep.clone()));
+            msgs.push((
+                "peer_representation",
+                std::borrow::Cow::Borrowed(rep.as_str()),
+            ));
         }
         if let Some(ref card) = self.peer_card {
-            msgs.push(("peer_card", Self::format_peer_card(card)));
+            msgs.push((
+                "peer_card",
+                std::borrow::Cow::Owned(Self::format_peer_card(card)),
+            ));
         }
         if let Some(ref summary) = self.summary {
-            msgs.push(("summary", summary.content.clone()));
+            msgs.push((
+                "summary",
+                std::borrow::Cow::Borrowed(summary.content.as_str()),
+            ));
         }
         msgs
     }

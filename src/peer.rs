@@ -598,8 +598,8 @@ impl Peer {
         if let Some(ref v) = options.target {
             builder = builder.target(v.clone());
         }
-        if let Some(v) = options.search_query.clone() {
-            builder = builder.search_query(v);
+        if let Some(ref v) = options.search_query {
+            builder = builder.search_query(v.clone());
         }
         if let Some(v) = options.search_top_k {
             builder = builder.search_top_k(v);
@@ -1314,10 +1314,14 @@ impl ContextBuilder {
 
         let route = routes::peer_context(&self.workspace_id, &self.peer_id)?;
         let mut params: Vec<(&str, String)> = Vec::new();
-        push_param!(params, "target", self.target);
+        if let Some(v) = self.target {
+            params.push(("target", v));
+        }
         push_param!(params, "summary", self.summary);
         push_param!(params, "limit_to_session", self.limit_to_session);
-        push_param!(params, "search_query", self.search_query);
+        if let Some(v) = self.search_query {
+            params.push(("search_query", v));
+        }
         push_param!(params, "search_top_k", self.search_top_k);
         push_param!(params, "search_max_distance", self.search_max_distance);
         push_param!(params, "include_most_frequent", self.include_most_frequent);
