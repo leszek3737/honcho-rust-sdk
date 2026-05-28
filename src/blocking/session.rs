@@ -360,40 +360,38 @@ impl std::fmt::Debug for BlockingUploadFileBuilder<'_> {
 }
 
 impl BlockingUploadFileBuilder<'_> {
+    fn with_inner(
+        self,
+        f: impl FnOnce(crate::UploadFileBuilder<'_>) -> crate::UploadFileBuilder<'_>,
+    ) -> Self {
+        Self {
+            inner: f(self.inner),
+            reader_handle: self.reader_handle,
+        }
+    }
+
     /// Set the peer that owns the uploaded file (required).
     #[must_use]
     pub fn peer(self, id: impl Into<String>) -> Self {
-        Self {
-            inner: self.inner.peer(id),
-            reader_handle: self.reader_handle,
-        }
+        self.with_inner(|b| b.peer(id))
     }
 
     /// Attach arbitrary JSON metadata to the created message(s).
     #[must_use]
     pub fn metadata(self, value: Value) -> Self {
-        Self {
-            inner: self.inner.metadata(value),
-            reader_handle: self.reader_handle,
-        }
+        self.with_inner(|b| b.metadata(value))
     }
 
     /// Attach configuration to the created message(s).
     #[must_use]
     pub fn configuration(self, value: Value) -> Self {
-        Self {
-            inner: self.inner.configuration(value),
-            reader_handle: self.reader_handle,
-        }
+        self.with_inner(|b| b.configuration(value))
     }
 
     /// Override the creation timestamp (ISO 3339).
     #[must_use]
     pub fn created_at(self, dt: DateTime<Utc>) -> Self {
-        Self {
-            inner: self.inner.created_at(dt),
-            reader_handle: self.reader_handle,
-        }
+        self.with_inner(|b| b.created_at(dt))
     }
 
     /// Send the upload request and return the created messages.

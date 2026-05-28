@@ -429,12 +429,12 @@ where
 pub(crate) fn validate_pagination(page: u64, size: u64) -> Result<()> {
     if page == 0 {
         return Err(HonchoError::Validation(
-            "page must be greater than or equal to 1".to_string(),
+            "page must be greater than or equal to 1".into(),
         ));
     }
     if !(1..=100).contains(&size) {
         return Err(HonchoError::Validation(
-            "size must be between 1 and 100".to_string(),
+            "size must be between 1 and 100".into(),
         ));
     }
     Ok(())
