@@ -1,4 +1,4 @@
-# API Reference — honcho-ai v0.1.4
+# API Reference — honcho-ai v0.1.5
 
 Complete reference for the Honcho Rust SDK. Every public type, method, and pattern.
 

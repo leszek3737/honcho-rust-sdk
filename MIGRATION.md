@@ -1,6 +1,6 @@
 # Migration Guide
 
-## 0.1.2 → 0.1.4
+## 0.1.2 → 0.1.5
 
 ### New: `Session::context_builder()` for fine-grained Session Context
 

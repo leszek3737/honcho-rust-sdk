@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.5] - 2026-05-28
+
+### Added
+
+- `ConclusionFilters` typed struct for conclusion list and query requests (replaces raw `JsonValue` filters).
+- `SessionCreate::validate()` for client-side session ID validation (non-empty, `[a-zA-Z0-9_-]` only).
+- `validate_search_params()` shared validation for `search_top_k`, `search_max_distance`, and `max_conclusions` range checks.
+- `serialize_upload_fields()` reusable helper for multipart upload form field serialization.
+- `SessionContext::build_context_messages()` and `format_peer_card()` shared helpers for OpenAI/Anthropic context formatting.
+- `BlockingUploadFileBuilder::with_inner()` internal helper reducing boilerplate in blocking upload builder methods.
+- `push_param!` macro for building query parameter lists in `ContextBuilder::send()`.
+- Documentation for `DialecticOptions::validate()` with usage example.
+
+### Changed
+
+- `Peer::refresh()` and `Peer::get_configuration_raw()` now share `fetch_and_update_cache()` helper.
+- `Peer::context()` delegates to `ContextBuilder` instead of building query parameters manually.
+- `RepresentationBuilder::send()` and `ContextBuilder::send()` use shared `validate_search_params()`.
+- `map_to_peer_config()` avoids intermediate `serde_json::to_value` serialization — maps directly to `Value::Object`.
+- Conclusion list and query requests use typed `ConclusionGet`/`ConclusionQuery` with `ConclusionFilters` instead of `serde_json::json!`.
+- `BlockingUploadFileBuilder` methods delegate through `with_inner()` instead of manual struct construction.
+- `to_openai()` and `to_anthropic()` use shared `build_context_messages()` loop instead of duplicated inline formatting.
+- `validate_pagination()` uses `.into()` instead of `.to_string()` for error messages.
+
 ## [0.1.4] - 2026-05-27
 
 ### Added
