@@ -10,7 +10,7 @@ use tokio::sync::OnceCell;
 use url::Url;
 
 use crate::error::{HonchoError, Result};
-use crate::http::client::{HttpClient, normalize_base_url};
+use crate::http::client::{DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, HttpClient, normalize_base_url};
 use crate::http::routes;
 use crate::peer::Peer;
 use crate::session::{PeerSpec, Session};
@@ -159,8 +159,8 @@ impl Honcho {
                 .base_url(resolved_base_url)
                 .maybe_api_key(resolved_api_key)
                 .maybe_http_client(params.http_client)
-                .timeout(params.timeout.unwrap_or(Duration::from_secs(60)))
-                .max_retries(params.max_retries.unwrap_or(2))
+                .timeout(params.timeout.unwrap_or(DEFAULT_TIMEOUT))
+                .max_retries(params.max_retries.unwrap_or(DEFAULT_MAX_RETRIES))
                 .default_headers(params.default_headers.unwrap_or_default())
                 .default_query(params.default_query.unwrap_or_default())
                 .build(),
@@ -244,15 +244,10 @@ impl Honcho {
 
     /// Fetch workspace metadata from the server.
     pub async fn get_metadata(&self) -> Result<HashMap<String, Value>> {
-        let body = crate::types::workspace::WorkspaceCreate {
-            id: self.inner.workspace_id.clone(),
-            metadata: None,
-            configuration: None,
-        };
         let ws: Workspace = self
             .inner
             .http
-            .post(&routes::workspaces(), Some(&body), &[])
+            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
             .await?;
         Ok(ws.metadata)
     }
@@ -279,15 +274,10 @@ impl Honcho {
     /// }
     /// ```
     pub async fn get_configuration(&self) -> Result<WorkspaceConfiguration> {
-        let body = crate::types::workspace::WorkspaceCreate {
-            id: self.inner.workspace_id.clone(),
-            metadata: None,
-            configuration: None,
-        };
         let ws: Workspace = self
             .inner
             .http
-            .post(&routes::workspaces(), Some(&body), &[])
+            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
             .await?;
         Ok(ws.configuration)
     }
@@ -322,15 +312,10 @@ impl Honcho {
     /// Use this when the server returns fields not yet represented in
     /// [`WorkspaceConfiguration`].
     pub async fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
-        let body = crate::types::workspace::WorkspaceCreate {
-            id: self.inner.workspace_id.clone(),
-            metadata: None,
-            configuration: None,
-        };
         let raw: serde_json::Value = self
             .inner
             .http
-            .post(&routes::workspaces(), Some(&body), &[])
+            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
             .await?;
         match raw.get("configuration") {
             Some(serde_json::Value::Object(map)) => {
@@ -457,6 +442,8 @@ impl Honcho {
 
     /// Refresh workspace state by re-fetching metadata and configuration.
     ///
+    /// Issues a single `GET /v3/workspaces/{id}` request.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -467,8 +454,11 @@ impl Honcho {
     /// # }
     /// ```
     pub async fn refresh(&self) -> Result<()> {
-        let _ = self.get_metadata().await?;
-        let _ = self.get_configuration().await?;
+        let _: Workspace = self
+            .inner
+            .http
+            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
+            .await?;
         Ok(())
     }
 

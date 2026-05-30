@@ -46,6 +46,8 @@ where
         block_on(StreamNext {
             stream: &mut self.stream,
         })
+        .ok()
+        .flatten()
     }
 }
 

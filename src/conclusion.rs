@@ -15,6 +15,7 @@ use crate::types::conclusion::{ConclusionBatchCreate, ConclusionCreate};
 use crate::types::conclusion::{ConclusionFilters, ConclusionGet, ConclusionQuery};
 use crate::types::dialectic::RepresentationResponse;
 use crate::types::pagination::paginate_post;
+use crate::types::session::validate_search_params;
 
 pub(crate) struct ConclusionInner {
     workspace_id: String,
@@ -278,8 +279,7 @@ impl ConclusionScope {
     /// Create one or more conclusions in this scope.
     ///
     /// Auto-injects `observer_id` and `observed_id` from the scope. If more
-    /// than 100 conclusions are provided they are sent in a single request.
-    /// If the server enforces a limit, the request will fail.
+    /// than 100 conclusions are provided they are sent in batches of 100.
     ///
     /// # Examples
     ///
@@ -430,7 +430,7 @@ impl ConclusionScope {
     ///
     /// # Errors
     ///
-    /// Returns [`HonchoError::Validation`] if `top_k` ∉ [1, 100]
+    /// Returns [`HonchoError::Validation`] if `query` is empty, `top_k` ∉ [1, 100],
     /// or `distance` ∉ [0.0, 1.0]. Returns [`HonchoError::Server`] on
     /// transport or API errors.
     pub fn query(&self, query: impl Into<String>) -> QueryConclusionsBuilder {
@@ -574,27 +574,11 @@ impl ConclusionRepresentationBuilder {
     /// Returns [`HonchoError::Validation`]
     /// if `search_top_k`, `search_max_distance`, or `max_conclusions` are out of range.
     pub async fn send(self) -> Result<String> {
-        if let Some(k) = self.search_top_k
-            && !(1..=100).contains(&k)
-        {
-            return Err(crate::error::HonchoError::Validation(format!(
-                "search_top_k must be between 1 and 100, got {k}"
-            )));
-        }
-        if let Some(d) = self.search_max_distance
-            && !(0.0..=1.0).contains(&d)
-        {
-            return Err(crate::error::HonchoError::Validation(format!(
-                "search_max_distance must be between 0.0 and 1.0, got {d}"
-            )));
-        }
-        if let Some(c) = self.max_conclusions
-            && !(1..=100).contains(&c)
-        {
-            return Err(crate::error::HonchoError::Validation(format!(
-                "max_conclusions must be between 1 and 100, got {c}"
-            )));
-        }
+        validate_search_params(
+            self.search_top_k,
+            self.search_max_distance,
+            self.max_conclusions,
+        )?;
 
         let params = crate::types::peer::PeerRepresentationGet {
             session_id: None,
@@ -771,22 +755,15 @@ impl QueryConclusionsBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`HonchoError::Validation`] if `top_k` ∉ [1, 100]
+    /// Returns [`HonchoError::Validation`] if `query` is empty, `top_k` ∉ [1, 100],
     /// or `distance` ∉ [0.0, 1.0].
     pub async fn send(self) -> Result<Vec<Conclusion>> {
-        if !(1..=100).contains(&self.top_k) {
-            return Err(HonchoError::Validation(format!(
-                "top_k must be between 1 and 100, got {}",
-                self.top_k
-            )));
+        if self.query.is_empty() {
+            return Err(HonchoError::Validation(
+                "query must not be empty".to_string(),
+            ));
         }
-        if let Some(d) = self.distance
-            && !(0.0..=1.0).contains(&d)
-        {
-            return Err(HonchoError::Validation(format!(
-                "distance must be between 0.0 and 1.0, got {d}"
-            )));
-        }
+        validate_search_params(Some(self.top_k), self.distance, None)?;
         let body = ConclusionQuery::builder()
             .query(self.query)
             .top_k(self.top_k)
@@ -1312,6 +1289,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn query_validates_empty_query() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+
+        let err = scope.query("").send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
     }
 
     #[tokio::test]

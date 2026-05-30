@@ -89,8 +89,10 @@ async fn ensure_workspace_failure_retries_next_call() {
 
     Mock::given(method("POST"))
         .respond_with(move |_: &Request| {
+            // POST is non-idempotent, so it is not retried within a single call.
+            // The first call fails on 503; the second call succeeds.
             let n = call_count.fetch_add(1, Ordering::SeqCst);
-            if n < 3 {
+            if n < 1 {
                 ResponseTemplate::new(503)
             } else {
                 ResponseTemplate::new(200).set_body_json(&ws_json)

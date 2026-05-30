@@ -198,6 +198,40 @@ pub(crate) const SEARCH_MAX_DISTANCE_MAX: f64 = 1.0;
 pub(crate) const MAX_CONCLUSIONS_MIN: u32 = 1;
 pub(crate) const MAX_CONCLUSIONS_MAX: u32 = 100;
 
+/// Validate optional search/conclusion parameters.
+///
+/// Checks that `search_top_k` is in 1–100, `search_max_distance` is in 0.0–1.0,
+/// and `max_conclusions` is in 1–100. Returns `Err(HonchoError::Validation)` on
+/// any out-of-range value.
+pub(crate) fn validate_search_params(
+    search_top_k: Option<u32>,
+    search_max_distance: Option<f64>,
+    max_conclusions: Option<u32>,
+) -> std::result::Result<(), crate::error::HonchoError> {
+    if let Some(k) = search_top_k
+        && !(SEARCH_TOP_K_MIN..=SEARCH_TOP_K_MAX).contains(&k)
+    {
+        return Err(crate::error::HonchoError::Validation(format!(
+            "search_top_k must be between {SEARCH_TOP_K_MIN} and {SEARCH_TOP_K_MAX}, got {k}"
+        )));
+    }
+    if let Some(d) = search_max_distance
+        && !(SEARCH_MAX_DISTANCE_MIN..=SEARCH_MAX_DISTANCE_MAX).contains(&d)
+    {
+        return Err(crate::error::HonchoError::Validation(format!(
+            "search_max_distance must be between {SEARCH_MAX_DISTANCE_MIN} and {SEARCH_MAX_DISTANCE_MAX}, got {d}"
+        )));
+    }
+    if let Some(c) = max_conclusions
+        && !(MAX_CONCLUSIONS_MIN..=MAX_CONCLUSIONS_MAX).contains(&c)
+    {
+        return Err(crate::error::HonchoError::Validation(format!(
+            "max_conclusions must be between {MAX_CONCLUSIONS_MIN} and {MAX_CONCLUSIONS_MAX}, got {c}"
+        )));
+    }
+    Ok(())
+}
+
 impl SessionContextOptions {
     /// Validate cross-field constraints.
     pub fn validate(&self) -> std::result::Result<(), crate::error::HonchoError> {
@@ -211,27 +245,11 @@ impl SessionContextOptions {
                 "search_query requires peer_target to be set".into(),
             ));
         }
-        if let Some(k) = self.search_top_k
-            && !(SEARCH_TOP_K_MIN..=SEARCH_TOP_K_MAX).contains(&k)
-        {
-            return Err(crate::error::HonchoError::Validation(format!(
-                "search_top_k must be between {SEARCH_TOP_K_MIN} and {SEARCH_TOP_K_MAX}"
-            )));
-        }
-        if let Some(d) = self.search_max_distance
-            && !(SEARCH_MAX_DISTANCE_MIN..=SEARCH_MAX_DISTANCE_MAX).contains(&d)
-        {
-            return Err(crate::error::HonchoError::Validation(format!(
-                "search_max_distance must be between {SEARCH_MAX_DISTANCE_MIN} and {SEARCH_MAX_DISTANCE_MAX}"
-            )));
-        }
-        if let Some(m) = self.max_conclusions
-            && !(MAX_CONCLUSIONS_MIN..=MAX_CONCLUSIONS_MAX).contains(&m)
-        {
-            return Err(crate::error::HonchoError::Validation(format!(
-                "max_conclusions must be between {MAX_CONCLUSIONS_MIN} and {MAX_CONCLUSIONS_MAX}"
-            )));
-        }
+        validate_search_params(
+            self.search_top_k,
+            self.search_max_distance,
+            self.max_conclusions,
+        )?;
         if let Some(t) = self.tokens
             && t == 0
         {
@@ -240,6 +258,52 @@ impl SessionContextOptions {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn to_query_params(&self) -> Vec<(&str, String)> {
+        let mut params: Vec<(&str, String)> = vec![
+            (
+                "summary",
+                if self.summary { "true" } else { "false" }.to_string(),
+            ),
+            (
+                "limit_to_session",
+                if self.limit_to_session {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_string(),
+            ),
+        ];
+        if let Some(v) = self.tokens {
+            params.push(("tokens", v.to_string()));
+        }
+        if let Some(ref v) = self.peer_target {
+            params.push(("peer_target", v.clone()));
+        }
+        if let Some(ref v) = self.peer_perspective {
+            params.push(("peer_perspective", v.clone()));
+        }
+        if let Some(ref v) = self.search_query {
+            params.push(("search_query", v.clone()));
+        }
+        if let Some(v) = self.search_top_k {
+            params.push(("search_top_k", v.to_string()));
+        }
+        if let Some(v) = self.search_max_distance {
+            params.push(("search_max_distance", v.to_string()));
+        }
+        if let Some(v) = self.include_most_frequent {
+            params.push((
+                "include_most_frequent",
+                if v { "true" } else { "false" }.to_string(),
+            ));
+        }
+        if let Some(v) = self.max_conclusions {
+            params.push(("max_conclusions", v.to_string()));
+        }
+        params
     }
 }
 

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use reqwest::Method;
@@ -11,8 +11,17 @@ use url::Url;
 use crate::error::{self, HonchoError, Result};
 use crate::http::decode;
 
-const DEFAULT_MAX_RETRIES: u32 = 2;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Returns `true` for HTTP methods safe to retry (idempotent).
+/// POST and PATCH are excluded — retrying them risks duplicates.
+fn is_idempotent(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::DELETE | Method::PUT | Method::OPTIONS
+    )
+}
+
+pub(crate) const DEFAULT_MAX_RETRIES: u32 = 2;
+pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub(crate) fn normalize_base_url(base_url: &str) -> Result<Url> {
@@ -86,6 +95,19 @@ impl HttpClient {
         self.inner.base_url.to_string()
     }
 
+    /// Build a full URL by appending `path` to the base URL.
+    ///
+    /// Unlike [`Url::join`], an absolute `path` (e.g. `/v3/workspaces`) does NOT
+    /// replace the base URL's path component. Instead the path is appended as-is.
+    /// This is required because route helpers in [`crate::http::routes`] return
+    /// absolute paths like `/v3/...`.
+    fn build_url(&self, path: &str) -> Result<Url> {
+        let base = self.inner.base_url.as_str().trim_end_matches('/');
+        let path = path.strip_prefix('/').unwrap_or(path);
+        Url::parse(&format!("{base}/{path}"))
+            .map_err(|e| HonchoError::Configuration(format!("failed to build URL: {e}")))
+    }
+
     pub fn from_params(params: HttpClientParams) -> Result<Self> {
         let base_url = normalize_base_url(&params.base_url)?;
         Self::from_params_with_base_url(params, base_url)
@@ -154,11 +176,7 @@ impl HttpClient {
         TBody: Serialize + ?Sized,
         TResp: DeserializeOwned + 'static,
     {
-        let url = self
-            .inner
-            .base_url
-            .join(path)
-            .map_err(|e| HonchoError::Configuration(format!("failed to join URL path: {e}")))?;
+        let url = self.build_url(path)?;
 
         let merged_query: Vec<(&str, &str)> = self
             .inner
@@ -197,11 +215,12 @@ impl HttpClient {
                         HonchoError::Transport(e)
                     };
 
-                    let should_retry = !matches!(error, HonchoError::Transport(_))
+                    let should_retry = is_idempotent(&method)
+                        && !matches!(error, HonchoError::Transport(_))
                         && attempt < self.inner.max_retries;
 
                     if should_retry {
-                        tokio::time::sleep(delay_for_attempt(attempt)).await;
+                        tokio::time::sleep(jittered_delay(attempt)).await;
                         attempt += 1;
                         continue;
                     }
@@ -236,13 +255,14 @@ impl HttpClient {
             };
             let api_error = error::from_response(status, &headers, &body_bytes, Utc::now());
 
-            let is_retryable = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
+            let is_retryable =
+                is_idempotent(&method) && matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
 
             if is_retryable && attempt < self.inner.max_retries {
                 let retry_after = headers
                     .get("retry-after")
                     .and_then(|v| error::parse_retry_after(v, Utc::now()));
-                let delay = retry_after.unwrap_or_else(|| delay_for_attempt(attempt));
+                let delay = retry_after.unwrap_or_else(|| jittered_delay(attempt));
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
@@ -335,11 +355,7 @@ impl HttpClient {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<reqwest::multipart::Form>>,
     {
-        let url = self
-            .inner
-            .base_url
-            .join(path)
-            .map_err(|e| HonchoError::Configuration(format!("failed to join URL path: {e}")))?;
+        let url = self.build_url(path)?;
 
         let merged_query: Vec<(&str, &str)> = self
             .inner
@@ -380,11 +396,12 @@ impl HttpClient {
                         HonchoError::Transport(e)
                     };
 
-                    let should_retry = !matches!(error, HonchoError::Transport(_))
+                    let should_retry = is_idempotent(&method)
+                        && !matches!(error, HonchoError::Transport(_))
                         && attempt < self.inner.max_retries;
 
                     if should_retry {
-                        tokio::time::sleep(delay_for_attempt(attempt)).await;
+                        tokio::time::sleep(jittered_delay(attempt)).await;
                         attempt += 1;
                         continue;
                     }
@@ -419,13 +436,14 @@ impl HttpClient {
             };
             let api_error = error::from_response(status, &headers, &body_bytes, Utc::now());
 
-            let is_retryable = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
+            let is_retryable =
+                is_idempotent(&method) && matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
 
             if is_retryable && attempt < self.inner.max_retries {
                 let retry_after = headers
                     .get("retry-after")
                     .and_then(|v| error::parse_retry_after(v, Utc::now()));
-                let delay = retry_after.unwrap_or_else(|| delay_for_attempt(attempt));
+                let delay = retry_after.unwrap_or_else(|| jittered_delay(attempt));
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
@@ -442,11 +460,7 @@ impl HttpClient {
         body: Option<&serde_json::Value>,
         query: &[(&str, &str)],
     ) -> Result<reqwest::Response> {
-        let url = self
-            .inner
-            .base_url
-            .join(path)
-            .map_err(|e| HonchoError::Configuration(format!("failed to join URL path: {e}")))?;
+        let url = self.build_url(path)?;
 
         let merged_query: Vec<(&str, &str)> = self
             .inner
@@ -525,6 +539,23 @@ pub fn delay_for_attempt(attempt: u32) -> Duration {
     INITIAL_RETRY_DELAY
         .saturating_mul(1u32 << shift)
         .min(Duration::from_secs(60))
+}
+
+/// Returns `delay_for_attempt(attempt)` with uniform jitter applied.
+///
+/// The returned duration is in the half-open range `[delay/2, delay)` to avoid
+/// thundering herd when many clients retry simultaneously. Jitter entropy comes
+/// from the wall-clock sub-second nanoseconds — no external RNG crate needed.
+fn jittered_delay(attempt: u32) -> Duration {
+    let base = delay_for_attempt(attempt);
+    // Use the sub-second nanoseconds of the wall clock as a cheap pseudo-random
+    // source. This varies on every call, giving a roughly uniform distribution.
+    let entropy = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    // Map to [0.5, 1.0): factor in [500, 999], scaled by 1000.
+    let jitter_factor = 500 + (entropy % 500);
+    base * jitter_factor / 1000
 }
 
 #[cfg(test)]
@@ -632,6 +663,22 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/v3/test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
+            .mount(&server)
+            .await;
+
+        let result: Peer = client.get("/v3/test", &[]).await.unwrap();
+        assert_eq!(result.id, "p1");
+    }
+
+    #[tokio::test]
+    async fn base_url_with_path_prefix_preserved() {
+        let server = MockServer::start().await;
+        let base = format!("{}/api", server.uri());
+        let client = HttpClient::from_params(HttpClient::builder().base_url(base).build()).unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v3/test"))
             .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
             .mount(&server)
             .await;
@@ -1038,6 +1085,49 @@ mod tests {
         assert!(client.get::<Peer>("/v3/test", &[]).await.is_err());
     }
 
+    #[rstest::rstest]
+    #[case(429)]
+    #[case(500)]
+    #[case(502)]
+    #[case(503)]
+    #[case(504)]
+    #[tokio::test]
+    async fn no_retry_post_on_retryable_status(#[case] status: u16) {
+        let server = MockServer::start().await;
+        let client = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(5)
+                .build(),
+        )
+        .unwrap();
+
+        // POST is non-idempotent — no retry even on retryable status codes
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let body = serde_json::json!({"key": "value"});
+        let err = client
+            .post::<_, Peer>("/v3/test", Some(&body), &[])
+            .await
+            .unwrap_err();
+        // 429 maps to RateLimit, 5xx maps to Server
+        if status == 429 {
+            assert!(
+                matches!(err, HonchoError::RateLimit { .. }),
+                "expected RateLimit, got {err:?}"
+            );
+        } else {
+            assert!(
+                matches!(err, HonchoError::Server { status: s, .. } if s == status),
+                "expected Server({status}), got {err:?}"
+            );
+        }
+    }
+
     // ── Backoff ──────────────────────────────────────────────────────────
 
     #[test]
@@ -1052,6 +1142,23 @@ mod tests {
     #[test]
     fn delay_for_attempt_capped_at_60s() {
         assert_eq!(delay_for_attempt(10), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn jittered_delay_within_expected_range() {
+        // Many samples per attempt so we exercise the entropy distribution and
+        // catch any factor that escapes the half-open range [0.5, 1.0).
+        for attempt in 0..6 {
+            let base = delay_for_attempt(attempt);
+            for _ in 0..1000 {
+                let jittered = jittered_delay(attempt);
+                assert!(
+                    jittered >= base / 2 && jittered < base,
+                    "jittered={jittered:?} not in [{:?}, {base:?}) for attempt={attempt}",
+                    base / 2,
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1232,9 +1339,10 @@ mod tests {
         let server = MockServer::start().await;
         let client = make_client(&server);
 
+        // POST is non-idempotent — no retry, only 1 attempt
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(503))
-            .expect(3)
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -1259,30 +1367,37 @@ mod tests {
     #[case(503)]
     #[case(504)]
     #[tokio::test]
-    async fn retries_multipart_on_retryable_status(#[case] status: u16) {
+    async fn no_retry_multipart_on_retryable_status_for_post(#[case] status: u16) {
         let server = MockServer::start().await;
         let client = make_client(&server);
 
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_json()))
-            .mount(&server)
-            .await;
-
+        // POST is non-idempotent — no retry even on retryable status codes
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(status))
-            .up_to_n_times(1)
+            .expect(1)
             .mount(&server)
             .await;
 
-        let result: Workspace = client
-            .post_multipart(
+        let err = client
+            .post_multipart::<Workspace, _, _>(
                 "/v3/upload",
                 || async { Ok(reqwest::multipart::Form::new().text("key", "value")) },
                 &[],
             )
             .await
-            .unwrap();
-        assert_eq!(result.id, "ws_abc123");
+            .unwrap_err();
+        // 429 maps to RateLimit, 5xx maps to Server
+        if status == 429 {
+            assert!(
+                matches!(err, HonchoError::RateLimit { .. }),
+                "expected RateLimit, got {err:?}"
+            );
+        } else {
+            assert!(
+                matches!(err, HonchoError::Server { status: s, .. } if s == status),
+                "expected Server({status}), got {err:?}"
+            );
+        }
     }
 
     // ── Streaming ────────────────────────────────────────────────────────

@@ -176,7 +176,10 @@ impl SseParser {
                 tracing::warn!(
                     "Failed to decode streaming chunk: {} (data: {})",
                     e,
-                    &json_str[..json_str.len().min(100)]
+                    &json_str[..json_str
+                        .char_indices()
+                        .nth(100)
+                        .map_or(json_str.len(), |(i, _)| i)]
                 );
                 let _ = &e;
                 return None;
