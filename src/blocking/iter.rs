@@ -42,12 +42,12 @@ where
 {
     type Item = S::Item;
 
+    #[expect(clippy::expect_used)]
     fn next(&mut self) -> Option<Self::Item> {
         block_on(StreamNext {
             stream: &mut self.stream,
         })
-        .ok()
-        .flatten()
+        .expect("blocking::Honcho cannot be called from within an async runtime")
     }
 }
 

@@ -552,9 +552,13 @@ fn jittered_delay(attempt: u32) -> Duration {
     // source. This varies on every call, giving a roughly uniform distribution.
     let entropy = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
+        .unwrap_or_else(|e| e.duration())
+        .subsec_nanos();
+    // Mix the entropy to avoid issues on platforms with coarse clock resolutions
+    // (e.g., microsecond or millisecond clocks where subsec_nanos is a multiple of 500).
+    let scrambled = entropy.wrapping_mul(1_103_515_245).wrapping_add(12_345);
     // Map to [0.5, 1.0): factor in [500, 999], scaled by 1000.
-    let jitter_factor = 500 + (entropy % 500);
+    let jitter_factor = 500 + (scrambled % 500);
     base * jitter_factor / 1000
 }
 

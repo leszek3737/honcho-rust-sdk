@@ -16,5 +16,8 @@ async fn blocking_force_ensure_inside_async_returns_error() {
         matches!(err, honcho_ai::error::HonchoError::Configuration(_)),
         "expected Configuration error, got {err:?}"
     );
-    assert!(err.to_string().contains("cannot be called from within an async runtime"));
+    assert!(
+        err.to_string()
+            .contains("cannot be called from within an async runtime")
+    );
 }

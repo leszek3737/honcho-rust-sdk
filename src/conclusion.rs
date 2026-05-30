@@ -763,7 +763,13 @@ impl QueryConclusionsBuilder {
                 "query must not be empty".to_string(),
             ));
         }
-        validate_search_params(Some(self.top_k), self.distance, None)?;
+        validate_search_params(Some(self.top_k), self.distance, None).map_err(|e| {
+            if let HonchoError::Validation(msg) = &e {
+                HonchoError::Validation(msg.replace("search_max_distance", "distance"))
+            } else {
+                e
+            }
+        })?;
         let body = ConclusionQuery::builder()
             .query(self.query)
             .top_k(self.top_k)
