@@ -110,6 +110,21 @@ pub enum HonchoError {
     /// Validation error (e.g. duplicate inputs, invalid arguments).
     #[error("Validation error: {0}")]
     Validation(String),
+    /// Partial failure in a chunked batch operation.
+    ///
+    /// Some chunks succeeded before an error occurred. The `messages` field
+    /// contains the successfully created messages from earlier chunks, and
+    /// `error` holds the underlying error that caused the failure.
+    #[error("Partial failure after {sent} messages: {error}")]
+    PartialFailure {
+        /// Messages that were successfully created before the failure.
+        messages: Vec<crate::Message>,
+        /// The number of messages successfully sent.
+        sent: usize,
+        /// The underlying error that caused the partial failure.
+        #[source]
+        error: Box<HonchoError>,
+    },
 }
 
 impl HonchoError {
@@ -135,6 +150,7 @@ impl HonchoError {
             Self::Io(_) => "io_error",
             Self::Configuration(_) => "configuration_error",
             Self::Validation(_) => "validation_error",
+            Self::PartialFailure { .. } => "partial_failure",
         }
     }
 
@@ -157,6 +173,7 @@ impl HonchoError {
             | Self::Io(_)
             | Self::Configuration(_)
             | Self::Validation(_) => None,
+            Self::PartialFailure { error, .. } => error.status_code(),
         }
     }
 
@@ -172,6 +189,26 @@ impl HonchoError {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::RateLimit { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this is a partial failure with some successful messages.
+    #[must_use]
+    pub fn is_partial_failure(&self) -> bool {
+        matches!(self, Self::PartialFailure { .. })
+    }
+
+    /// Extract the partial failure data, consuming the error.
+    ///
+    /// Returns `Some((messages, error))` if this is a `PartialFailure`,
+    /// `None` otherwise.
+    #[must_use]
+    pub fn into_partial_failure(self) -> Option<(Vec<crate::Message>, Box<HonchoError>)> {
+        match self {
+            Self::PartialFailure {
+                messages, error, ..
+            } => Some((messages, error)),
             _ => None,
         }
     }
@@ -197,6 +234,7 @@ impl HonchoError {
             Self::Decode { .. } => "failed to decode response",
             Self::Configuration(s) => s,
             Self::Validation(s) => s,
+            Self::PartialFailure { error, .. } => error.message(),
         }
     }
 }
@@ -214,26 +252,24 @@ pub fn parse_error_body(body: &[u8]) -> (String, Option<serde_json::Value>) {
         return (msg, None);
     };
 
-    let full_body = Some(value.clone());
-
     if let Some(obj) = value.as_object() {
         if let Some(detail) = obj.get("detail").and_then(|v| v.as_str()) {
-            return (detail.to_string(), full_body);
+            return (detail.to_string(), Some(value));
         }
         if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
-            return (message.to_string(), full_body);
+            return (message.to_string(), Some(value));
         }
         if let Some(error) = obj.get("error").and_then(|v| v.as_str()) {
-            return (error.to_string(), full_body);
+            return (error.to_string(), Some(value));
         }
-        return (value.to_string(), full_body);
+        return (value.to_string(), Some(value));
     }
 
     if let Some(s) = value.as_str() {
-        return (s.to_string(), full_body);
+        return (s.to_string(), Some(value));
     }
 
-    (value.to_string(), full_body)
+    (value.to_string(), Some(value))
 }
 
 /// Parse a Retry-After header value.

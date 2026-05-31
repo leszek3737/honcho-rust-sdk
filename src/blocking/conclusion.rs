@@ -107,7 +107,7 @@ impl ConclusionScope {
         &self,
         conclusions: impl IntoIterator<Item = impl Into<ConclusionCreateParams>>,
     ) -> Result<Vec<Conclusion>> {
-        block_on(self.inner.create(conclusions))
+        block_on(self.inner.create(conclusions))?
             .map(|v| v.into_iter().map(Conclusion::new).collect())
     }
 
@@ -137,7 +137,7 @@ impl ConclusionScope {
 
     /// Delete a conclusion by ID.
     pub fn delete(&self, conclusion_id: impl Into<String>) -> Result<()> {
-        block_on(self.inner.delete(conclusion_id))
+        block_on(self.inner.delete(conclusion_id))?
     }
 }
 
@@ -189,7 +189,7 @@ impl BlockingConclusionRepresentationBuilder {
 
     /// Send the request.
     pub fn send(self) -> Result<String> {
-        block_on(self.inner.send())
+        block_on(self.inner.send())?
     }
 }
 
@@ -240,7 +240,7 @@ impl BlockingListConclusionsBuilder {
 
     /// Send and return paginated result.
     pub fn send(self) -> Result<ConclusionPage> {
-        block_on(self.inner.send())
+        block_on(self.inner.send())?
     }
 }
 
@@ -275,7 +275,7 @@ impl BlockingQueryConclusionsBuilder {
 
     /// Send the query.
     pub fn send(self) -> Result<Vec<Conclusion>> {
-        block_on(self.inner.send()).map(|v| v.into_iter().map(Conclusion::new).collect())
+        block_on(self.inner.send())?.map(|v| v.into_iter().map(Conclusion::new).collect())
     }
 }
 

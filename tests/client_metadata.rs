@@ -28,15 +28,14 @@ fn workspace_response(
 }
 
 #[tokio::test]
-async fn gets_workspace_metadata_by_post_get_or_create() {
+async fn gets_workspace_metadata_by_get() {
     let server = MockServer::start().await;
 
     let metadata = json!({"env": "production", "team": "core"});
     let response = workspace_response(metadata, json!({}));
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "test-ws"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -54,9 +53,8 @@ async fn get_metadata_empty_when_no_metadata() {
 
     let response = workspace_response(json!({}), json!({}));
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "test-ws"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -112,15 +110,14 @@ async fn set_metadata_server_error_returns_error() {
 }
 
 #[tokio::test]
-async fn gets_workspace_configuration_by_post_get_or_create() {
+async fn gets_workspace_configuration_by_get() {
     let server = MockServer::start().await;
 
     let config = json!({"reasoning": {"enabled": true}});
     let response = workspace_response(json!({}), config);
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "test-ws"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -137,9 +134,8 @@ async fn get_configuration_empty_when_no_configuration() {
 
     let response = workspace_response(json!({}), json!({}));
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "test-ws"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -154,15 +150,14 @@ async fn get_configuration_empty_when_no_configuration() {
 }
 
 #[tokio::test]
-async fn gets_workspace_configuration_raw_by_post_get_or_create() {
+async fn gets_workspace_configuration_raw_by_get() {
     let server = MockServer::start().await;
 
     let config = json!({"unknown_future_field": {"enabled": true}});
     let response = workspace_response(json!({}), config);
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "test-ws"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(&server)
         .await;
@@ -205,12 +200,11 @@ async fn workspace_id_accessor() {
 }
 
 #[tokio::test]
-async fn get_metadata_returns_error_when_get_or_create_fails() {
+async fn get_metadata_returns_error_when_get_fails() {
     let server = MockServer::start().await;
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "nonexistent"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/nonexistent"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
         .mount(&server)
         .await;
@@ -225,12 +219,11 @@ async fn get_metadata_returns_error_when_get_or_create_fails() {
 }
 
 #[tokio::test]
-async fn get_configuration_returns_error_when_get_or_create_fails() {
+async fn get_configuration_returns_error_when_get_fails() {
     let server = MockServer::start().await;
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(json!({"id": "nonexistent"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/nonexistent"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
         .mount(&server)
         .await;

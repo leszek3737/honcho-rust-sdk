@@ -652,9 +652,8 @@ async fn blocking_peer_representation_builder_with_options() {
 async fn blocking_client_get_configuration() {
     let server = MockServer::start().await;
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(serde_json::json!({"id": "ws1"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ws_json_with_config()))
         .mount(&server)
         .await;
@@ -926,9 +925,8 @@ async fn blocking_client_delete_workspace() {
 async fn blocking_client_get_metadata() {
     let server = MockServer::start().await;
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(serde_json::json!({"id": "ws1"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "ws1",
             "metadata": {"env": "test"},
@@ -971,9 +969,8 @@ async fn blocking_client_set_metadata() {
 async fn blocking_client_refresh() {
     let server = MockServer::start().await;
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .and(body_json(serde_json::json!({"id": "ws1"})))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "ws1",
             "metadata": {"env": "test"},

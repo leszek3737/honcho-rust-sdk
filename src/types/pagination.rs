@@ -19,7 +19,8 @@ type PageFetcher<TRaw> = Arc<
 ///
 /// Deserializes directly from paginated JSON responses. Convert to
 /// [`Page`] for lazy-fetch and transform support via
-/// [`Page::from_page_response`].
+/// [`Page::from_page_response`]. Use [`PageResponse::with_fetcher`] to
+/// attach a fetcher in one step without cloning the items vector.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageResponse<T> {
@@ -57,6 +58,33 @@ impl<T> Default for PageResponse<T> {
             page: 1,
             size: 0,
             pages: 0,
+        }
+    }
+}
+
+#[allow(clippy::mismatching_type_param_order)]
+impl<T: 'static> PageResponse<T> {
+    /// Convert this response into a [`Page`] with an attached fetcher,
+    /// without cloning the items vector.
+    ///
+    /// This is more efficient than `Page::from_page_response(resp).with_fetcher(f)`
+    /// which clones the items during the `with_fetcher` step.
+    #[must_use]
+    pub fn with_fetcher<F, Fut>(self, fetcher: F) -> Page<T, T>
+    where
+        F: Fn(u64) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<PageResponse<T>>> + Send + 'static,
+    {
+        Page {
+            inner: Arc::new(PageInner {
+                items: self.items,
+                total: self.total,
+                page: self.page,
+                size: self.size,
+                pages: self.pages,
+                next_fetcher: Some(Arc::new(move |pn| Box::pin(fetcher(pn)))),
+                transform: Arc::new(std::convert::identity),
+            }),
         }
     }
 }
@@ -289,6 +317,30 @@ impl<TRaw: 'static> Page<TRaw, TRaw> {
     pub fn from_page_response(resp: PageResponse<TRaw>) -> Self {
         Self::new(resp.items, resp.total, resp.page, resp.size, resp.pages)
     }
+
+    /// Returns a slice of the raw items without cloning.
+    ///
+    /// This is the identity-transform equivalent of [`items`](Page::items)
+    /// that avoids allocating a new `Vec`.
+    #[must_use]
+    pub fn items_ref(&self) -> &[TRaw] {
+        &self.inner.items
+    }
+
+    /// Consume the page and return the items, avoiding cloning when possible.
+    ///
+    /// If this is the only reference to the inner data, the items are moved
+    /// out without cloning. Otherwise, falls back to cloning each item.
+    #[must_use]
+    pub fn into_items(self) -> Vec<TRaw>
+    where
+        TRaw: Clone,
+    {
+        match Arc::try_unwrap(self.inner) {
+            Ok(inner) => inner.items,
+            Err(arc) => arc.items.clone(),
+        }
+    }
 }
 
 #[allow(clippy::mismatching_type_param_order)]
@@ -401,13 +453,12 @@ where
     }
 
     let resp: PageResponse<T> = http.post(route, body, &query).await?;
-    let result = Page::from_page_response(resp);
 
     let http_clone = http.clone();
     let route_owned = route.to_owned();
     let body_clone = body.cloned();
 
-    Ok(result.with_fetcher(move |page_num| {
+    Ok(resp.with_fetcher(move |page_num| {
         let http = http_clone.clone();
         let route = route_owned.clone();
         let body = body_clone.clone();

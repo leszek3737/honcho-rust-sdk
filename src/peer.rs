@@ -166,14 +166,8 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.inner.id.as_str())))]
     pub async fn get_metadata(&self) -> Result<HashMap<String, Value>> {
-        self.refresh().await?;
-        Ok(self
-            .inner
-            .metadata
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default())
+        let resp = self.fetch_and_update_cache().await?;
+        Ok(resp.metadata)
     }
 
     /// Set the peer's metadata on the server and update the cache.
@@ -220,14 +214,8 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.inner.id.as_str())))]
     pub async fn get_configuration(&self) -> Result<PeerConfig> {
-        self.refresh().await?;
-        Ok(self
-            .inner
-            .configuration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default())
+        let resp = self.fetch_and_update_cache().await?;
+        Ok(map_to_peer_config(&resp.configuration)?.unwrap_or_default())
     }
 
     /// Set the peer's configuration on the server and update the cache.
@@ -737,7 +725,7 @@ impl Peer {
             .http
             .post(
                 &routes::peer_search(&self.inner.workspace_id, &self.inner.id)?,
-                Some(&options),
+                Some(options),
                 &[],
             )
             .await?;
@@ -1459,9 +1447,8 @@ fn validate_search_params(
 }
 
 fn map_to_peer_config(map: &HashMap<String, Value>) -> Result<Option<PeerConfig>> {
-    let obj: serde_json::Map<String, Value> =
-        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    serde_json::from_value(Value::Object(obj))
+    let val = serde_json::to_value(map).map_err(|e| HonchoError::Configuration(e.to_string()))?;
+    serde_json::from_value(val)
         .map(Some)
         .map_err(|e| HonchoError::Configuration(e.to_string()))
 }

@@ -51,7 +51,7 @@ impl Honcho {
 
     /// Eagerly ensure the workspace exists on the server.
     pub fn force_ensure(&self) -> Result<()> {
-        block_on(self.inner.force_ensure())
+        block_on(self.inner.force_ensure())?
     }
 
     /// Workspace ID this client is scoped to.
@@ -73,7 +73,7 @@ impl Honcho {
         metadata: Option<HashMap<String, Value>>,
         configuration: Option<HashMap<String, Value>>,
     ) -> Result<BlockingPeer> {
-        block_on(self.inner.peer(id, metadata, configuration)).map(BlockingPeer::new)
+        block_on(self.inner.peer(id, metadata, configuration))?.map(BlockingPeer::new)
     }
 
     /// Get or create a session by ID.
@@ -84,7 +84,7 @@ impl Honcho {
         peers: Option<Vec<PeerSpec>>,
         configuration: Option<crate::SessionConfiguration>,
     ) -> Result<BlockingSession> {
-        block_on(self.inner.session(id, metadata, peers, configuration)).map(BlockingSession::new)
+        block_on(self.inner.session(id, metadata, peers, configuration))?.map(BlockingSession::new)
     }
 
     /// Search messages across the workspace.
@@ -94,12 +94,12 @@ impl Honcho {
         limit: Option<u32>,
         filters: Option<HashMap<String, Value>>,
     ) -> Result<Vec<crate::Message>> {
-        block_on(self.inner.search(query, limit, filters))
+        block_on(self.inner.search(query, limit, filters))?
     }
 
     /// Refresh workspace state.
     pub fn refresh(&self) -> Result<()> {
-        block_on(self.inner.refresh())
+        block_on(self.inner.refresh())?
     }
 
     /// Get queue processing status.
@@ -109,7 +109,7 @@ impl Honcho {
         sender_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<QueueStatus> {
-        block_on(self.inner.queue_status(observer_id, sender_id, session_id))
+        block_on(self.inner.queue_status(observer_id, sender_id, session_id))?
     }
 
     /// Schedule a dream task for memory consolidation.
@@ -122,42 +122,42 @@ impl Honcho {
         block_on(
             self.inner
                 .schedule_dream(observer, session_id, observed_peer),
-        )
+        )?
     }
 
     /// Delete a workspace by ID.
     pub fn delete_workspace(&self, id: &str) -> Result<()> {
-        block_on(self.inner.delete_workspace(id))
+        block_on(self.inner.delete_workspace(id))?
     }
 
     /// Fetch workspace metadata.
     pub fn get_metadata(&self) -> Result<HashMap<String, Value>> {
-        block_on(self.inner.get_metadata())
+        block_on(self.inner.get_metadata())?
     }
 
     /// Set workspace metadata.
     pub fn set_metadata(&self, metadata: HashMap<String, Value>) -> Result<()> {
-        block_on(self.inner.set_metadata(metadata))
+        block_on(self.inner.set_metadata(metadata))?
     }
 
     /// Fetch workspace configuration as a typed [`WorkspaceConfiguration`].
     pub fn get_configuration(&self) -> Result<WorkspaceConfiguration> {
-        block_on(self.inner.get_configuration())
+        block_on(self.inner.get_configuration())?
     }
 
     /// Set workspace configuration from a typed [`WorkspaceConfiguration`].
     pub fn set_configuration(&self, config: &WorkspaceConfiguration) -> Result<()> {
-        block_on(self.inner.set_configuration(config))
+        block_on(self.inner.set_configuration(config))?
     }
 
     /// Fetch workspace configuration as a raw JSON map.
     pub fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
-        block_on(self.inner.get_configuration_raw())
+        block_on(self.inner.get_configuration_raw())?
     }
 
     /// Set workspace configuration from a raw JSON map.
     pub fn set_configuration_raw(&self, configuration: HashMap<String, Value>) -> Result<()> {
-        block_on(self.inner.set_configuration_raw(configuration))
+        block_on(self.inner.set_configuration_raw(configuration))?
     }
 
     /// List all peers in the workspace, collecting across pages.
@@ -165,7 +165,7 @@ impl Honcho {
         block_on(async {
             let page = self.inner.peers().await?;
             collect_all_pages(page).await
-        })
+        })?
     }
 
     /// List peers with filters, collecting across pages.
@@ -184,7 +184,7 @@ impl Honcho {
                 .peers_with_filters(filters, page, size, reverse)
                 .await?;
             collect_all_pages(page).await
-        })
+        })?
     }
 
     /// List all sessions in the workspace, collecting across pages.
@@ -192,7 +192,7 @@ impl Honcho {
         block_on(async {
             let page = self.inner.sessions().await?;
             collect_all_pages(page).await
-        })
+        })?
     }
 
     /// List sessions with filters, collecting across pages.
@@ -211,7 +211,7 @@ impl Honcho {
                 .sessions_with_filters(filters, page, size, reverse)
                 .await?;
             collect_all_pages(page).await
-        })
+        })?
     }
 
     /// List all workspace IDs, collecting across pages.
@@ -219,6 +219,6 @@ impl Honcho {
         block_on(async {
             let page = self.inner.workspaces().await?;
             collect_all_pages(page).await
-        })
+        })?
     }
 }

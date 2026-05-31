@@ -814,7 +814,10 @@ impl Session {
     ///
     /// If more than 100 messages are provided, they are automatically chunked
     /// into batches of 100 and sent as separate requests. On chunk failure the
-    /// already-sent messages are **not** rolled back (non-atomic).
+    /// already-sent messages are **not** rolled back (non-atomic). When a chunk
+    /// fails after earlier chunks succeeded, the error is a
+    /// [`HonchoError::PartialFailure`] containing the successfully created
+    /// messages from the earlier chunks.
     ///
     /// # Examples
     ///
@@ -844,9 +847,27 @@ impl Session {
             for chunk in messages.chunks(100) {
                 let batch = chunk.to_vec();
                 let body = crate::types::message::MessageBatchCreate { messages: batch };
-                let batch_responses: Vec<MessageResponse> =
-                    self.inner.http.post(&route, Some(&body), &[]).await?;
-                all.extend(batch_responses);
+                match self
+                    .inner
+                    .http
+                    .post::<_, Vec<MessageResponse>>(&route, Some(&body), &[])
+                    .await
+                {
+                    Ok(batch_responses) => all.extend(batch_responses),
+                    Err(e) if all.is_empty() => return Err(e),
+                    Err(e) => {
+                        let sent = all.len();
+                        let partial: Vec<Message> = all
+                            .into_iter()
+                            .map(|r| Message::from_raw(self.inner.workspace_id.clone(), r))
+                            .collect();
+                        return Err(HonchoError::PartialFailure {
+                            messages: partial,
+                            sent,
+                            error: Box::new(e),
+                        });
+                    }
+                }
             }
             all
         };
@@ -1125,48 +1146,7 @@ impl Session {
     ) -> Result<crate::types::session::SessionContext> {
         options.validate()?;
         let route = routes::session_context(&self.inner.workspace_id, &self.inner.id)?;
-        let mut params: Vec<(&str, String)> = vec![
-            (
-                "summary",
-                if options.summary { "true" } else { "false" }.to_string(),
-            ),
-            (
-                "limit_to_session",
-                if options.limit_to_session {
-                    "true"
-                } else {
-                    "false"
-                }
-                .to_string(),
-            ),
-        ];
-        if let Some(ref v) = options.tokens {
-            params.push(("tokens", v.to_string()));
-        }
-        if let Some(ref v) = options.peer_target {
-            params.push(("peer_target", v.clone()));
-        }
-        if let Some(ref v) = options.peer_perspective {
-            params.push(("peer_perspective", v.clone()));
-        }
-        if let Some(ref v) = options.search_query {
-            params.push(("search_query", v.clone()));
-        }
-        if let Some(ref v) = options.search_top_k {
-            params.push(("search_top_k", v.to_string()));
-        }
-        if let Some(ref v) = options.search_max_distance {
-            params.push(("search_max_distance", v.to_string()));
-        }
-        if let Some(ref v) = options.include_most_frequent {
-            params.push((
-                "include_most_frequent",
-                if *v { "true" } else { "false" }.to_string(),
-            ));
-        }
-        if let Some(ref v) = options.max_conclusions {
-            params.push(("max_conclusions", v.to_string()));
-        }
+        let params = options.to_query_params();
         let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
         self.inner.http.get(&route, &refs).await
     }
@@ -1491,27 +1471,11 @@ impl SessionRepresentationBuilder {
     /// or `max_conclusions` are out of range.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(session_id = self.session_id.as_str(), peer_id = self.peer_id.as_str())))]
     pub async fn send(self) -> Result<String> {
-        if let Some(k) = self.search_top_k
-            && !(1..=100).contains(&k)
-        {
-            return Err(HonchoError::Validation(format!(
-                "search_top_k must be between 1 and 100, got {k}"
-            )));
-        }
-        if let Some(d) = self.search_max_distance
-            && !(0.0..=1.0).contains(&d)
-        {
-            return Err(HonchoError::Validation(format!(
-                "search_max_distance must be between 0.0 and 1.0, got {d}"
-            )));
-        }
-        if let Some(c) = self.max_conclusions
-            && !(1..=100).contains(&c)
-        {
-            return Err(HonchoError::Validation(format!(
-                "max_conclusions must be between 1 and 100, got {c}"
-            )));
-        }
+        crate::types::session::validate_search_params(
+            self.search_top_k,
+            self.search_max_distance,
+            self.max_conclusions,
+        )?;
 
         let params = crate::types::peer::PeerRepresentationGet {
             session_id: Some(self.session_id),
@@ -1650,48 +1614,7 @@ impl SessionContextBuilder {
         options.validate()?;
 
         let route = routes::session_context(&self.workspace_id, &self.session_id)?;
-        let mut params: Vec<(&str, String)> = vec![
-            (
-                "summary",
-                if options.summary { "true" } else { "false" }.to_string(),
-            ),
-            (
-                "limit_to_session",
-                if options.limit_to_session {
-                    "true"
-                } else {
-                    "false"
-                }
-                .to_string(),
-            ),
-        ];
-        if let Some(v) = options.tokens {
-            params.push(("tokens", v.to_string()));
-        }
-        if let Some(ref v) = options.peer_target {
-            params.push(("peer_target", v.clone()));
-        }
-        if let Some(ref v) = options.peer_perspective {
-            params.push(("peer_perspective", v.clone()));
-        }
-        if let Some(ref v) = options.search_query {
-            params.push(("search_query", v.clone()));
-        }
-        if let Some(v) = options.search_top_k {
-            params.push(("search_top_k", v.to_string()));
-        }
-        if let Some(v) = options.search_max_distance {
-            params.push(("search_max_distance", v.to_string()));
-        }
-        if let Some(v) = options.include_most_frequent {
-            params.push((
-                "include_most_frequent",
-                if v { "true" } else { "false" }.to_string(),
-            ));
-        }
-        if let Some(v) = options.max_conclusions {
-            params.push(("max_conclusions", v.to_string()));
-        }
+        let params = options.to_query_params();
         let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
         self.http.get(&route, &refs).await
     }

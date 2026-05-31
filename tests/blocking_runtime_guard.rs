@@ -9,8 +9,15 @@ fn honcho_new_does_not_panic() {
 
 #[cfg(feature = "blocking")]
 #[tokio::test]
-#[should_panic(expected = "cannot be called from within an async runtime")]
-async fn blocking_force_ensure_inside_async_panics() {
+async fn blocking_force_ensure_inside_async_returns_error() {
     let honcho = honcho_ai::blocking::Honcho::new("http://localhost:9999", "ws").unwrap();
-    let _ = honcho.force_ensure();
+    let err = honcho.force_ensure().unwrap_err();
+    assert!(
+        matches!(err, honcho_ai::error::HonchoError::Configuration(_)),
+        "expected Configuration error, got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("cannot be called from within an async runtime")
+    );
 }
