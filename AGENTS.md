@@ -3,7 +3,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **honcho-rust-sdk** (2383 symbols, 7591 relationships, 208 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **honcho-rust-sdk** (2534 symbols, 7911 relationships, 221 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -86,6 +86,7 @@ API base path is `/v3/`. All route builders live in `src/http/routes.rs`.
 - **Builders**: `bon::Builder` with `#[builder(finish_fn = build)]` on all param struct names ending in `Params`.
 - **Wrapper pattern**: Public types (`Honcho`, `Peer`, `Session`, `Message`, `Conclusion`) use `Arc<Inner>` with accessor methods. Never expose inner fields directly.
 - **No unwrap/expect/panic in library code**: enforced by `#[deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`. Use `Result` everywhere. Tests may `#![allow(...)]` these.
+- **Don't use `#[allow(...)]` to bypass the deny lints in library code.** A "validated above" `Option::expect()` is a code smell — restructure instead. Prefer `let Some(x) = opt else { return Err(...) }` (let-else) or `opt.ok_or_else(|| ...)?` so the impossibility is enforced by the type, not an escape hatch. `#[allow]` on a clippy lint is acceptable only when the lint is a genuine false positive (e.g. `trivially_copy_pass_by_ref` on a serde `skip_serializing_if` fn, `mismatching_type_param_order` on `Page<T, T>`) — add a comment when the reason isn't obvious.
 - **`#[non_exhaustive]`** on `HonchoError`. Match on `code()` (machine-readable string) not variants.
 - **Edition 2024** — all impl blocks may need `unsafe` markers for unsafe trait impls.
 

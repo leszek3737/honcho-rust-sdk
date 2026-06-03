@@ -1,0 +1,5 @@
+{
+  "query": "search term",
+  "limit": 50,
+  "filters": {"env": "prod"}
+}
