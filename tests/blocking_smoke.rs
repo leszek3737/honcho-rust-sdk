@@ -987,3 +987,239 @@ async fn blocking_client_refresh() {
         client.refresh().unwrap();
     });
 }
+
+// ─── Conclusion: query, list, delete ─────────────────────────────────
+
+fn conclusion_json(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "content": format!("conclusion {id}"),
+        "observer_id": "alice",
+        "observed_id": "bob",
+        "workspace_id": "ws1",
+        "created_at": "2025-01-15T10:30:00Z"
+    })
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_conclusion_query() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_peer(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/conclusions/query"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(vec![conclusion_json("c1"), conclusion_json("c2")]),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let peer = client.peer("alice", None, None).unwrap();
+        let scope = peer.conclusions();
+        let results = scope.query("test query").top_k(5).send().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id(), "c1");
+        assert_eq!(results[1].id(), "c2");
+    });
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_conclusion_list() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_peer(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/conclusions/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page_json(
+            vec![conclusion_json("c1")],
+            1,
+            1,
+            50,
+            1,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let peer = client.peer("alice", None, None).unwrap();
+        let scope = peer.conclusions();
+        let page = scope.list().send().unwrap();
+        assert_eq!(page.items().len(), 1);
+    });
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_conclusion_delete() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_peer(&server).await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/v3/workspaces/ws1/conclusions/c1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let peer = client.peer("alice", None, None).unwrap();
+        let scope = peer.conclusions();
+        scope.delete("c1").unwrap();
+    });
+}
+
+// ─── Session: clone, clone_with_message, representation_builder ──────
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_session_clone() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1/clone"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "sess1-clone",
+            "workspace_id": "ws1",
+            "is_active": true,
+            "metadata": {},
+            "configuration": {},
+            "created_at": "2025-01-15T10:30:00Z"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        let cloned = session.clone_session().unwrap();
+        assert_eq!(cloned.id(), "sess1-clone");
+    });
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_session_clone_with_message() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1/clone"))
+        .and(query_param("message_id", "msg1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "sess1-clone",
+            "workspace_id": "ws1",
+            "is_active": true,
+            "metadata": {},
+            "configuration": {},
+            "created_at": "2025-01-15T10:30:00Z"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        let cloned = session.clone_session_with_message("msg1").unwrap();
+        assert_eq!(cloned.id(), "sess1-clone");
+    });
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_session_representation_builder() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/peers/alice/representation"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "representation": "alice is a user"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        let rep = session
+            .representation_builder("alice")
+            .search_query("hobbies")
+            .search_top_k(10)
+            .send()
+            .unwrap();
+        assert_eq!(rep, "alice is a user");
+    });
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_peer_set_configuration_raw() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_peer(&server).await;
+
+    Mock::given(method("PUT"))
+        .and(path("/v3/workspaces/ws1/peers/alice"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let peer = client.peer("alice", None, None).unwrap();
+        let mut config = std::collections::HashMap::new();
+        config.insert("custom".into(), serde_json::json!(42));
+        peer.set_configuration_raw(config).unwrap();
+    });
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_peer_update() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_peer(&server).await;
+
+    Mock::given(method("PUT"))
+        .and(path("/v3/workspaces/ws1/peers/alice"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let peer = client.peer("alice", None, None).unwrap();
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("role".into(), serde_json::json!("admin"));
+        peer.update(meta).unwrap();
+    });
+}

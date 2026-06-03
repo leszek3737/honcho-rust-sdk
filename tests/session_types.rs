@@ -4,9 +4,9 @@ mod common;
 
 use common::{load_fixture, roundtrip, validate_openapi};
 use honcho_ai::types::session::{
-    Session, SessionConfiguration, SessionContext, SessionCreate, SessionGet, SessionPage,
-    SessionPeerConfig, SessionQueueStatus, SessionSummaries, SessionUpdate, Summary,
-    SummaryConfiguration,
+    Session, SessionConfiguration, SessionContext, SessionContextOptions, SessionCreate,
+    SessionGet, SessionPage, SessionPeerConfig, SessionQueueStatus, SessionSummaries,
+    SessionUpdate, Summary, SummaryConfiguration,
 };
 
 macro_rules! schema_tests {
@@ -114,4 +114,26 @@ fn session_get_builder_skips_none() {
     let get = SessionGet::builder().build();
     let json = serde_json::to_value(&get).unwrap();
     assert_eq!(json, serde_json::json!({}));
+}
+
+#[test]
+fn session_context_options_roundtrip_min() {
+    let fixture = load_fixture("SessionContextOptions", "min");
+    roundtrip::<SessionContextOptions>(fixture);
+}
+
+#[test]
+fn session_context_options_roundtrip_max() {
+    let fixture = load_fixture("SessionContextOptions", "max");
+    roundtrip::<SessionContextOptions>(fixture);
+}
+
+#[test]
+fn session_context_options_defaults() {
+    let opts: SessionContextOptions = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(opts.summary);
+    assert!(!opts.limit_to_session);
+    assert!(opts.tokens.is_none());
+    assert!(opts.peer_target.is_none());
+    assert!(opts.peer_perspective.is_none());
 }

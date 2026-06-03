@@ -6,8 +6,8 @@ mod common;
 use common::*;
 
 use honcho_ai::types::peer::{
-    Peer, PeerCardConfiguration, PeerCardResponse, PeerCardSet, PeerContext, PeerCreate, PeerGet,
-    PeerPage, PeerRepresentationGet, PeerUpdate,
+    Peer, PeerCardConfiguration, PeerCardResponse, PeerCardSet, PeerConfig, PeerContext,
+    PeerContextOptions, PeerCreate, PeerGet, PeerPage, PeerRepresentationGet, PeerUpdate,
 };
 use rstest::rstest;
 use serde::Serialize;
@@ -94,4 +94,25 @@ fn peer_representation_get(#[case] variant: &str) {
 #[case::max("max")]
 fn peer_page(#[case] variant: &str) {
     do_test::<PeerPage>("Page_Peer_", variant);
+}
+
+#[rstest]
+#[case::min("min")]
+#[case::max("max")]
+fn peer_context_options_roundtrip(#[case] variant: &str) {
+    let fixture = load_fixture("PeerContextOptions", variant);
+    roundtrip::<PeerContextOptions>(fixture);
+}
+
+#[test]
+fn peer_config_defaults() {
+    let cfg: PeerConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(cfg.observe_me.is_none());
+    assert!(cfg.observe_others.is_none());
+}
+
+#[test]
+fn peer_config_roundtrip() {
+    let fixture = serde_json::json!({"observe_me": true, "observe_others": false});
+    roundtrip::<PeerConfig>(fixture);
 }

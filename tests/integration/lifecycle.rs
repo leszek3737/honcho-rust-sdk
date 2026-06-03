@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use honcho_ai::ConclusionCreateParams;
 use honcho_ai::session::PeerSpec;
 use honcho_ai::types::session::{SessionConfiguration, SessionPeerConfig};
 use serde_json::json;
@@ -327,4 +328,73 @@ async fn session_per_peer_configuration() {
 
     session.delete().await.unwrap();
     client.delete_workspace(client.workspace_id()).await.ok();
+}
+
+#[tokio::test]
+async fn conclusion_query_with_distance_filter() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let guard = WorkspaceGuard::new(client);
+    let client = guard.inner();
+
+    let observer = client.peer("conc-observer", None, None).await.unwrap();
+
+    let _observed = client.peer("conc-observed", None, None).await.unwrap();
+
+    let scope = observer.conclusions_of("conc-observed");
+
+    scope
+        .create([
+            ConclusionCreateParams::new("likes coffee in the morning"),
+            ConclusionCreateParams::new("enjoys hiking on weekends"),
+            ConclusionCreateParams::new("prefers dark mode in editors"),
+        ])
+        .await
+        .unwrap();
+
+    // small delay for indexing
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let max_attempts = 5;
+    let mut delay = Duration::from_millis(500);
+    let mut results = Vec::new();
+
+    for attempt in 0..max_attempts {
+        match scope
+            .query("coffee preferences")
+            .top_k(5)
+            .distance(1.0)
+            .send()
+            .await
+        {
+            Ok(r) if !r.is_empty() => {
+                results = r;
+                break;
+            }
+            Ok(_) | Err(honcho_ai::error::HonchoError::Server { .. })
+                if attempt + 1 < max_attempts =>
+            {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Ok(_) => break,
+            Err(e) => panic!("conclusion query failed: {e}"),
+        }
+    }
+
+    // verify we got at least one result (if server indexed in time)
+    if !results.is_empty() {
+        assert!(results.iter().any(|c| c.content().contains("coffee")));
+    }
+
+    // list conclusions
+    let page = scope.list().send().await.unwrap();
+    assert!(page.items().len() >= 3);
+
+    // clean up
+    for c in &page.items() {
+        scope.delete(c.id.clone()).await.ok();
+    }
+    drop(guard);
 }

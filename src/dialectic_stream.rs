@@ -235,4 +235,34 @@ mod tests {
         };
         assert_eq!(stream.final_response(), &expected);
     }
+
+    #[tokio::test]
+    async fn dialectic_stream_handles_pending_then_ready() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String>>(16);
+
+        let inner = async_stream::stream! {
+            while let Some(item) = rx.recv().await {
+                yield item;
+            }
+        };
+        let mut stream = DialecticStream::new(Box::pin(inner));
+
+        // Stream has no data yet — send after a short delay to simulate backpressure
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tx.send(Ok("delayed-chunk".to_string())).await.ok();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tx.send(Ok("-more".to_string())).await.ok();
+        });
+
+        let mut collected = Vec::new();
+        while let Some(item) = stream.next().await {
+            collected.push(item.unwrap());
+        }
+        handle.await.ok();
+
+        assert_eq!(collected, vec!["delayed-chunk", "-more"]);
+        assert_eq!(stream.final_response().content(), "delayed-chunk-more");
+        assert!(stream.is_complete());
+    }
 }

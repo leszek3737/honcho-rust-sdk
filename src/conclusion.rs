@@ -1072,6 +1072,32 @@ mod tests {
         assert_eq!(results.len(), 150);
     }
 
+    #[tokio::test]
+    async fn create_batch_exactly_100_is_one_request() {
+        let server = MockServer::start().await;
+        let scope = make_scope(&server);
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/conclusions"))
+            .respond_with(|req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let count = body["conclusions"].as_array().unwrap().len();
+                let items: Vec<serde_json::Value> = (0..count)
+                    .map(|i| conclusion_json(&format!("c-{i}"), &format!("id-{i}")))
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(&items)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let params: Vec<ConclusionCreateParams> = (0..100)
+            .map(|i| ConclusionCreateParams::new(format!("c-{i}")))
+            .collect();
+        let results = scope.create(params).await.unwrap();
+        assert_eq!(results.len(), 100);
+    }
+
     // ── F9.7: ConclusionScope::representation tests ──────────────────────
 
     #[tokio::test]
