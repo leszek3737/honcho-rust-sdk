@@ -53,7 +53,7 @@ cargo test --lib                        # unit tests only
 cargo test --test '*_types'             # schema validation + roundtrip tests (no server needed)
 cargo test --test integration           # integration tests (needs `HONCHO_API_URL`)
 cargo fmt --check
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 ```
 
@@ -89,6 +89,7 @@ API base path is `/v3/`. All route builders live in `src/http/routes.rs`.
 - **Don't use `#[allow(...)]` to bypass the deny lints in library code.** A "validated above" `Option::expect()` is a code smell — restructure instead. Prefer `let Some(x) = opt else { return Err(...) }` (let-else) or `opt.ok_or_else(|| ...)?` so the impossibility is enforced by the type, not an escape hatch. `#[allow]` on a clippy lint is acceptable only when the lint is a genuine false positive (e.g. `trivially_copy_pass_by_ref` on a serde `skip_serializing_if` fn, `mismatching_type_param_order` on `Page<T, T>`) — add a comment when the reason isn't obvious.
 - **`#[non_exhaustive]`** on `HonchoError`. Match on `code()` (machine-readable string) not variants.
 - **Edition 2024** — all impl blocks may need `unsafe` markers for unsafe trait impls.
+- **Always run after every change**: `cargo fmt --check && cargo fmt` (if needed) then `cargo clippy --all-targets --all-features -- -D warnings`. Fix all warnings. Only pre-existing warnings may remain.
 
 ## Env Var Resolution
 
