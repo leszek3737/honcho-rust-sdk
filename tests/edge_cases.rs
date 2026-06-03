@@ -58,6 +58,7 @@ async fn add_messages_empty_vec_returns_empty() {
 // --- Env var resolution: HONCHO_API_KEY -> Authorization header ---
 
 #[test]
+#[serial_test::serial]
 fn env_var_honcho_api_key_sends_bearer() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let server = rt.block_on(MockServer::start());
@@ -83,6 +84,7 @@ fn env_var_honcho_api_key_sends_bearer() {
 // --- Env var resolution: HONCHO_URL ---
 
 #[test]
+#[serial_test::serial]
 fn env_var_honcho_url_resolution() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let server = rt.block_on(MockServer::start());

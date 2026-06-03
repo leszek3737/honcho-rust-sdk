@@ -77,8 +77,7 @@ fn final_response_display() {
 #[test]
 fn file_source_bytes() {
     let src = FileSource::bytes("test.txt", b"hello", "text/plain");
-    // verify it's the bytes variant (Debug doesn't expose internals)
     let dbg = format!("{src:?}");
     assert!(dbg.contains("test.txt"));
-    assert!(dbg.contains('5')); // byte count
+    assert!(dbg.contains("text/plain"));
 }
