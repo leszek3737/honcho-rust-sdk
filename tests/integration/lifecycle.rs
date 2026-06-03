@@ -338,15 +338,9 @@ async fn conclusion_query_with_distance_filter() {
     let guard = WorkspaceGuard::new(client);
     let client = guard.inner();
 
-    let observer = client
-        .peer("conc-observer", None, None)
-        .await
-        .unwrap();
+    let observer = client.peer("conc-observer", None, None).await.unwrap();
 
-    let _observed = client
-        .peer("conc-observed", None, None)
-        .await
-        .unwrap();
+    let _observed = client.peer("conc-observed", None, None).await.unwrap();
 
     let scope = observer.conclusions_of("conc-observed");
 

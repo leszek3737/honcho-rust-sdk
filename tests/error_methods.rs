@@ -271,7 +271,10 @@ fn code_all_variants() {
         .code(),
         "unprocessable_entity"
     );
-    assert_eq!(rate_limit_without_retry_after().code(), "rate_limit_exceeded");
+    assert_eq!(
+        rate_limit_without_retry_after().code(),
+        "rate_limit_exceeded"
+    );
     assert_eq!(
         HonchoError::Client {
             status: 418,
@@ -306,7 +309,10 @@ fn code_all_variants() {
         HonchoError::Configuration("c".into()).code(),
         "configuration_error"
     );
-    assert_eq!(HonchoError::Validation("v".into()).code(), "validation_error");
+    assert_eq!(
+        HonchoError::Validation("v".into()).code(),
+        "validation_error"
+    );
     assert_eq!(io_error().code(), "io_error");
     assert_eq!(partial_failure_error().code(), "partial_failure");
 }

@@ -178,11 +178,13 @@ fn conclusion_create_builder_roundtrip() {
 
 #[test]
 fn conclusion_batch_create_builder_roundtrip() {
-    let items = vec![ConclusionCreate::builder()
-        .content("item 1")
-        .observer_id("a")
-        .observed_id("b")
-        .build()];
+    let items = vec![
+        ConclusionCreate::builder()
+            .content("item 1")
+            .observer_id("a")
+            .observed_id("b")
+            .build(),
+    ];
     let batch = ConclusionBatchCreate::builder().conclusions(items).build();
     assert_eq!(batch.conclusions.len(), 1);
 
@@ -205,9 +207,7 @@ fn conclusion_filters_builder_roundtrip() {
 
 #[test]
 fn conclusion_get_builder_roundtrip() {
-    let filters = ConclusionFilters::builder()
-        .observer_id("alice")
-        .build();
+    let filters = ConclusionFilters::builder().observer_id("alice").build();
     let g = ConclusionGet::builder().filters(filters).build();
     assert_eq!(
         g.filters.as_ref().unwrap().observer_id.as_deref(),
@@ -220,9 +220,7 @@ fn conclusion_get_builder_roundtrip() {
 
 #[test]
 fn conclusion_query_builder_roundtrip() {
-    let filters = ConclusionFilters::builder()
-        .session_id("sess-1")
-        .build();
+    let filters = ConclusionFilters::builder().session_id("sess-1").build();
     let q = ConclusionQuery::builder()
         .query("search text")
         .top_k(5)

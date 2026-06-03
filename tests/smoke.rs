@@ -2,8 +2,8 @@
 
 use honcho_ai::types::dialectic::{DialecticOptions, ReasoningLevel};
 use honcho_ai::types::message::{MessageCreate, MessageSearchOptions};
-use honcho_ai::types::session::{SessionCreate, SessionContextOptions};
-use honcho_ai::{ConclusionCreateParams, FinalResponse, FileSource, Message};
+use honcho_ai::types::session::{SessionContextOptions, SessionCreate};
+use honcho_ai::{ConclusionCreateParams, FileSource, FinalResponse, Message};
 
 #[test]
 fn crate_compiles() {
@@ -80,5 +80,5 @@ fn file_source_bytes() {
     // verify it's the bytes variant (Debug doesn't expose internals)
     let dbg = format!("{src:?}");
     assert!(dbg.contains("test.txt"));
-    assert!(dbg.contains("5")); // byte count
+    assert!(dbg.contains('5')); // byte count
 }

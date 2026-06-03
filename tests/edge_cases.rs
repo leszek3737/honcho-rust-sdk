@@ -73,10 +73,7 @@ fn env_var_honcho_api_key_sends_bearer() {
 
     let uri = server.uri();
     temp_env::with_var("HONCHO_API_KEY", Some("test-secret-key"), || {
-        let params = Honcho::builder()
-            .base_url(&uri)
-            .workspace_id("ws1")
-            .build();
+        let params = Honcho::builder().base_url(&uri).workspace_id("ws1").build();
         let honcho = Honcho::from_params(params).unwrap();
         let result = rt.block_on(honcho.force_ensure());
         assert!(result.is_ok());
@@ -100,9 +97,7 @@ fn env_var_honcho_url_resolution() {
 
     let uri = server.uri();
     temp_env::with_var("HONCHO_URL", Some(uri.as_str()), || {
-        let params = Honcho::builder()
-            .workspace_id("ws1")
-            .build();
+        let params = Honcho::builder().workspace_id("ws1").build();
         let honcho = Honcho::from_params(params).unwrap();
         let result = rt.block_on(honcho.force_ensure());
         assert!(result.is_ok());

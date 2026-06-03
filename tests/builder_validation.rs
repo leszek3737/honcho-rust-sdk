@@ -22,9 +22,7 @@ fn session_create_validate_empty_id() {
 
 #[test]
 fn session_create_validate_invalid_chars() {
-    let sc = SessionCreate::builder()
-        .id("has space".to_string())
-        .build();
+    let sc = SessionCreate::builder().id("has space".to_string()).build();
     let err = sc.validate().unwrap_err();
     assert_eq!(err.code(), "validation_error");
     assert!(err.message().contains("[a-zA-Z0-9_-]"));
@@ -69,7 +67,10 @@ fn session_context_options_validate_perspective_requires_target() {
         .build();
     let err = opts.validate().unwrap_err();
     assert_eq!(err.code(), "validation_error");
-    assert!(err.message().contains("peer_perspective requires peer_target"));
+    assert!(
+        err.message()
+            .contains("peer_perspective requires peer_target")
+    );
 }
 
 #[test]

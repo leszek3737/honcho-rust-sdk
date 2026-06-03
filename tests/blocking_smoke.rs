@@ -1011,7 +1011,8 @@ async fn blocking_conclusion_query() {
     Mock::given(method("POST"))
         .and(path("/v3/workspaces/ws1/conclusions/query"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(vec![conclusion_json("c1"), conclusion_json("c2")]),
+            ResponseTemplate::new(200)
+                .set_body_json(vec![conclusion_json("c1"), conclusion_json("c2")]),
         )
         .expect(1)
         .mount(&server)
@@ -1038,12 +1039,13 @@ async fn blocking_conclusion_list() {
 
     Mock::given(method("POST"))
         .and(path("/v3/workspaces/ws1/conclusions/list"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(page_json(
-                vec![conclusion_json("c1")],
-                1, 1, 50, 1,
-            )),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(page_json(
+            vec![conclusion_json("c1")],
+            1,
+            1,
+            50,
+            1,
+        )))
         .expect(1)
         .mount(&server)
         .await;
@@ -1164,7 +1166,8 @@ async fn blocking_session_representation_builder() {
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
         let session = client.session("sess1", None, None, None).unwrap();
-        let rep = session.representation_builder("alice")
+        let rep = session
+            .representation_builder("alice")
             .search_query("hobbies")
             .search_top_k(10)
             .send()
