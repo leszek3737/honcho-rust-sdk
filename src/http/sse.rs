@@ -6,6 +6,10 @@
 use futures_util::StreamExt;
 use serde_json::Value;
 
+/// Maximum buffer size before an unterminated line is treated as an error.
+/// Prevents OOM from a malicious server that never sends newlines.
+const MAX_SSE_LINE_BYTES: usize = 1 << 20; // 1 MiB
+
 /// Incremental SSE parser that extracts `delta.content` strings from a
 /// `data: <json>` line stream.
 ///
@@ -28,25 +32,53 @@ impl SseParser {
     }
 
     /// Feed a byte chunk from the SSE stream, returning extracted content strings.
-    pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+    ///
+    /// # Errors
+    /// Returns `HonchoError::Connection` if a single unterminated line exceeds
+    /// `MAX_SSE_LINE_BYTES` (`DoS` guard).
+    pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>, crate::error::HonchoError> {
         if self.done || chunk.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.decode_pending(chunk);
-        self.drain_lines(false)
+        let lines = self.drain_lines(false);
+        // DoS guard: after draining all completed lines, whatever remains is a
+        // single unterminated line (plus any undecoded trailing bytes). Only
+        // that retained leftover is bounded — a large chunk made of many
+        // complete lines drains away and is fine.
+        if self
+            .buffer
+            .len()
+            .saturating_add(self.pending_bytes.len())
+            > MAX_SSE_LINE_BYTES
+        {
+            return Err(crate::error::HonchoError::Connection {
+                message: format!("SSE line exceeded maximum length of {MAX_SSE_LINE_BYTES} bytes"),
+            });
+        }
+        Ok(lines)
     }
 
     /// Flush remaining bytes and return any final content strings.
-    pub fn finalize(&mut self) -> Vec<String> {
+    ///
+    /// # Errors
+    /// Returns `HonchoError::Connection` if the buffered, unterminated line
+    /// exceeds `MAX_SSE_LINE_BYTES` (`DoS` guard).
+    pub fn finalize(&mut self) -> Result<Vec<String>, crate::error::HonchoError> {
         if self.done {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if !self.pending_bytes.is_empty() {
             let lossy = String::from_utf8_lossy(&self.pending_bytes);
             self.buffer.push_str(&lossy);
             self.pending_bytes.clear();
         }
-        self.drain_lines(true)
+        if self.buffer.len() > MAX_SSE_LINE_BYTES {
+            return Err(crate::error::HonchoError::Connection {
+                message: format!("SSE line exceeded maximum length of {MAX_SSE_LINE_BYTES} bytes"),
+            });
+        }
+        Ok(self.drain_lines(true))
     }
 
     /// Whether the stream has emitted a `done: true` message.
@@ -68,10 +100,10 @@ impl SseParser {
                 Err(e) => {
                     let valid_up_to = e.valid_up_to();
                     if valid_up_to > 0 {
-                        self.buffer.push_str(
-                            std::str::from_utf8(&self.pending_bytes[start..start + valid_up_to])
-                                .unwrap_or_default(),
-                        );
+                        let valid_slice =
+                            std::str::from_utf8(&self.pending_bytes[start..start + valid_up_to]);
+                        debug_assert!(valid_slice.is_ok(), "valid_up_to returned invalid UTF-8");
+                        self.buffer.push_str(valid_slice.unwrap_or(""));
                         start += valid_up_to;
                     }
                     match e.error_len() {
@@ -119,11 +151,8 @@ impl SseParser {
                 }
             }
             (Some(n), None) => {
-                let mut line = self.buffer[..n].to_string();
+                let line = self.buffer[..n].to_string();
                 self.buffer.drain(..=n);
-                if line.ends_with('\r') {
-                    line.pop();
-                }
                 Some(line)
             }
             (None, Some(r)) => {
@@ -151,11 +180,8 @@ impl SseParser {
                     self.buffer.drain(..end);
                     Some(line)
                 } else {
-                    let mut line = self.buffer[..n].to_string();
+                    let line = self.buffer[..n].to_string();
                     self.buffer.drain(..=n);
-                    if line.ends_with('\r') {
-                        line.pop();
-                    }
                     Some(line)
                 }
             }
@@ -164,15 +190,15 @@ impl SseParser {
 
     fn handle_line(&mut self, line: &str) -> Option<String> {
         let rest = line.strip_prefix("data:")?;
-        let json_str = rest.trim_start_matches(' ');
+        let json_str = rest.strip_prefix(' ').unwrap_or(rest);
         if json_str.is_empty() {
             return None;
         }
 
         let parsed: Value = match serde_json::from_str(json_str) {
             Ok(v) => v,
+            #[cfg(feature = "tracing")]
             Err(e) => {
-                #[cfg(feature = "tracing")]
                 tracing::warn!(
                     "Failed to decode streaming chunk: {} (data: {})",
                     e,
@@ -181,7 +207,10 @@ impl SseParser {
                         .nth(100)
                         .map_or(json_str.len(), |(i, _)| i)]
                 );
-                let _ = &e;
+                return None;
+            }
+            #[cfg(not(feature = "tracing"))]
+            Err(_) => {
                 return None;
             }
         };
@@ -189,7 +218,6 @@ impl SseParser {
         let obj = parsed.as_object()?;
 
         if let Some(done_val) = obj.get("done")
-            && !done_val.is_null()
             && done_val.as_bool().unwrap_or(false)
         {
             self.done = true;
@@ -212,6 +240,10 @@ impl Default for SseParser {
 }
 
 /// Parse a byte stream of SSE data into a stream of content strings.
+///
+/// # Errors
+/// Returns `HonchoError::Connection` if the underlying byte stream errors,
+/// or if an SSE line exceeds `MAX_SSE_LINE_BYTES` (`DoS` guard).
 pub fn parse_sse_stream(
     stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl futures_util::Stream<Item = Result<String, crate::error::HonchoError>> + Send + 'static {
@@ -224,7 +256,7 @@ pub fn parse_sse_stream(
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
-                    for content in parser.feed(&chunk) {
+                    for content in parser.feed(&chunk)? {
                         yield content;
                     }
                     if parser.done() {
@@ -232,6 +264,12 @@ pub fn parse_sse_stream(
                     }
                 }
                 Err(e) => {
+                    // Flush buffered content before propagating the error
+                    if let Ok(items) = parser.finalize() {
+                        for content in items {
+                            yield content;
+                        }
+                    }
                     yield Err(crate::error::HonchoError::Connection {
                         message: e.to_string(),
                     })?;
@@ -239,7 +277,7 @@ pub fn parse_sse_stream(
             }
         }
 
-        for content in parser.finalize() {
+        for content in parser.finalize()? {
             yield content;
         }
     }
@@ -258,7 +296,9 @@ mod tests {
     #[test]
     fn f8_2_2_basic_data_line() {
         let mut p = SseParser::new();
-        let r = p.feed(&data_line(r#"{"delta":{"content":"hello"}}"#));
+        let r = p
+            .feed(&data_line(r#"{"delta":{"content":"hello"}}"#))
+            .unwrap();
         assert_eq!(r, vec!["hello"]);
         assert!(!p.done());
     }
@@ -266,7 +306,7 @@ mod tests {
     #[test]
     fn f8_2_3_done_flag() {
         let mut p = SseParser::new();
-        let r = p.feed(&data_line(r#"{"done":true}"#));
+        let r = p.feed(&data_line(r#"{"done":true}"#)).unwrap();
         assert!(r.is_empty());
         assert!(p.done());
     }
@@ -275,8 +315,14 @@ mod tests {
     fn f8_2_4_consecutive_chunks() {
         let mut p = SseParser::new();
         let mut all = Vec::new();
-        all.extend(p.feed(&data_line(r#"{"delta":{"content":"hello"}}"#)));
-        all.extend(p.feed(&data_line(r#"{"delta":{"content":" world"}}"#)));
+        all.extend(
+            p.feed(&data_line(r#"{"delta":{"content":"hello"}}"#))
+                .unwrap(),
+        );
+        all.extend(
+            p.feed(&data_line(r#"{"delta":{"content":" world"}}"#))
+                .unwrap(),
+        );
         assert_eq!(all, vec!["hello", " world"]);
     }
 
@@ -290,8 +336,8 @@ mod tests {
 
         let mut p = SseParser::new();
         let mut results = Vec::new();
-        results.extend(p.feed(&full[..split_pos]));
-        results.extend(p.feed(&full[split_pos..]));
+        results.extend(p.feed(&full[..split_pos]).unwrap());
+        results.extend(p.feed(&full[split_pos..]).unwrap());
         assert_eq!(results, vec!["abc\u{00e9}"]);
     }
 
@@ -302,9 +348,9 @@ mod tests {
 
         let mut p = SseParser::new();
         let mut results = Vec::new();
-        results.extend(p.feed(&full[..mid]));
+        results.extend(p.feed(&full[..mid]).unwrap());
         assert!(results.is_empty());
-        results.extend(p.feed(&full[mid..]));
+        results.extend(p.feed(&full[mid..]).unwrap());
         assert_eq!(results, vec!["hello"]);
     }
 
@@ -312,30 +358,37 @@ mod tests {
     fn f8_2_7_ignore_non_data_lines() {
         let mut p = SseParser::new();
         let mut all = Vec::new();
-        all.extend(p.feed(b": heartbeat\n"));
-        all.extend(p.feed(b"event: foo\n"));
-        all.extend(p.feed(&data_line(r#"{"delta":{"content":"yes"}}"#)));
+        all.extend(p.feed(b": heartbeat\n").unwrap());
+        all.extend(p.feed(b"event: foo\n").unwrap());
+        all.extend(
+            p.feed(&data_line(r#"{"delta":{"content":"yes"}}"#))
+                .unwrap(),
+        );
         assert_eq!(all, vec!["yes"]);
     }
 
     #[test]
     fn f8_2_8_empty_data_line() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data:\n\ndata: {\"delta\":{\"content\":\"x\"}}\n\n");
+        let r = p
+            .feed(b"data:\n\ndata: {\"delta\":{\"content\":\"x\"}}\n\n")
+            .unwrap();
         assert_eq!(r, vec!["x"]);
     }
 
     #[test]
     fn f8_2_9_data_without_space() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data:{\"delta\":{\"content\":\"nospace\"}}\n\n");
+        let r = p
+            .feed(b"data:{\"delta\":{\"content\":\"nospace\"}}\n\n")
+            .unwrap();
         assert_eq!(r, vec!["nospace"]);
     }
 
     #[test]
     fn f8_2_10_malformed_json() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data: {garbage\n\n");
+        let r = p.feed(b"data: {garbage\n\n").unwrap();
         assert!(r.is_empty());
         assert!(!p.done());
     }
@@ -343,50 +396,57 @@ mod tests {
     #[test]
     fn f8_2_11_crlf() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data: {\"delta\":{\"content\":\"crlf\"}}\r\n\r\n");
+        let r = p
+            .feed(b"data: {\"delta\":{\"content\":\"crlf\"}}\r\n\r\n")
+            .unwrap();
         assert_eq!(r, vec!["crlf"]);
     }
 
     #[test]
     fn f8_2_12_lf_only() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data: {\"delta\":{\"content\":\"lf\"}}\n\n");
+        let r = p
+            .feed(b"data: {\"delta\":{\"content\":\"lf\"}}\n\n")
+            .unwrap();
         assert_eq!(r, vec!["lf"]);
     }
 
     #[test]
     fn f8_2_13_cr_only() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data: {\"delta\":{\"content\":\"cr\"}}\r\r");
+        let r = p
+            .feed(b"data: {\"delta\":{\"content\":\"cr\"}}\r\r")
+            .unwrap();
         assert_eq!(r, vec!["cr"]);
     }
 
     #[test]
     fn f8_2_14_delta_without_content() {
         let mut p = SseParser::new();
-        let r = p.feed(&data_line(r#"{"delta":{}}"#));
+        let r = p.feed(&data_line(r#"{"delta":{}}"#)).unwrap();
         assert!(r.is_empty());
     }
 
     #[test]
     fn f8_2_15_non_string_content() {
         let mut p = SseParser::new();
-        let r = p.feed(&data_line(r#"{"delta":{"content":42}}"#));
+        let r = p.feed(&data_line(r#"{"delta":{"content":42}}"#)).unwrap();
         assert!(r.is_empty());
     }
 
     #[test]
     fn f8_2_16_non_dict_json() {
         let mut p = SseParser::new();
-        let r = p.feed(b"data: [\"not\",\"dict\"]\n\n");
+        let r = p.feed(b"data: [\"not\",\"dict\"]\n\n").unwrap();
         assert!(r.is_empty());
     }
 
     #[test]
     fn f8_2_17_finalize_flushes_remaining() {
         let mut p = SseParser::new();
-        p.feed(b"data: {\"delta\":{\"content\":\"partial\"}}");
-        let r = p.finalize();
+        p.feed(b"data: {\"delta\":{\"content\":\"partial\"}}")
+            .unwrap();
+        let r = p.finalize().unwrap();
         assert_eq!(r, vec!["partial"]);
     }
 
@@ -394,9 +454,15 @@ mod tests {
     fn done_stops_further_feeds() {
         let mut p = SseParser::new();
         let mut all = Vec::new();
-        all.extend(p.feed(&data_line(r#"{"delta":{"content":"before"}}"#)));
-        all.extend(p.feed(&data_line(r#"{"done":true}"#)));
-        all.extend(p.feed(&data_line(r#"{"delta":{"content":"after"}}"#)));
+        all.extend(
+            p.feed(&data_line(r#"{"delta":{"content":"before"}}"#))
+                .unwrap(),
+        );
+        all.extend(p.feed(&data_line(r#"{"done":true}"#)).unwrap());
+        all.extend(
+            p.feed(&data_line(r#"{"delta":{"content":"after"}}"#))
+                .unwrap(),
+        );
         assert_eq!(all, vec!["before"]);
         assert!(p.done());
     }
@@ -404,15 +470,15 @@ mod tests {
     #[test]
     fn finalize_after_done_yields_nothing() {
         let mut p = SseParser::new();
-        p.feed(&data_line(r#"{"done":true}"#));
-        let r = p.finalize();
+        p.feed(&data_line(r#"{"done":true}"#)).unwrap();
+        let r = p.finalize().unwrap();
         assert!(r.is_empty());
     }
 
     #[test]
     fn empty_chunk_returns_empty() {
         let mut p = SseParser::new();
-        let r = p.feed(b"");
+        let r = p.feed(b"").unwrap();
         assert!(r.is_empty());
     }
 
@@ -423,10 +489,10 @@ mod tests {
         let mut chunk1 = b"data: {\"delta\":{\"content\":\"".to_vec();
         chunk1.push(0xFF);
         chunk1.extend_from_slice(b"\"}}\n\n");
-        let r1 = p.feed(&chunk1);
+        let r1 = p.feed(&chunk1).unwrap();
         assert_eq!(r1, vec!["\u{FFFD}"]);
 
-        let r2 = p.feed(&data_line(r#"{"delta":{"content":"ok"}}"#));
+        let r2 = p.feed(&data_line(r#"{"delta":{"content":"ok"}}"#)).unwrap();
         assert_eq!(r2, vec!["ok"]);
     }
 
@@ -441,8 +507,54 @@ mod tests {
         let mut p = SseParser::new();
         let input = b"data: {\"delta\":{\"content\":\"a\"}}\n\
                       data: {\"delta\":{\"content\":\"b\"}}\n\n";
-        let r = p.feed(input);
+        let r = p.feed(input).unwrap();
         assert_eq!(r, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn feed_rejects_oversized_line() {
+        let mut p = SseParser::new();
+        let huge = vec![b'a'; MAX_SSE_LINE_BYTES + 1];
+        let result = p.feed(&huge);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn feed_rejects_unterminated_line_across_chunks() {
+        // No single chunk exceeds the limit, but an unterminated line that keeps
+        // accumulating across feeds must still be rejected.
+        let mut p = SseParser::new();
+        let half = vec![b'a'; (MAX_SSE_LINE_BYTES / 2) + 1];
+        assert!(p.feed(&half).is_ok());
+        assert!(p.feed(&half).is_err());
+    }
+
+    #[test]
+    fn feed_accepts_large_chunk_of_complete_lines() {
+        // A chunk far larger than MAX_SSE_LINE_BYTES is fine as long as every
+        // line is terminated — completed lines drain away and never accumulate.
+        let mut p = SseParser::new();
+        let mut chunk = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..200_000 {
+            let line = format!("data: {{\"delta\":{{\"content\":\"{i}\"}}}}\n");
+            chunk.extend_from_slice(line.as_bytes());
+            expected.push(i.to_string());
+        }
+        assert!(chunk.len() > MAX_SSE_LINE_BYTES);
+        let r = p.feed(&chunk).expect("large chunk of complete lines must be accepted");
+        assert_eq!(r, expected);
+    }
+
+    #[test]
+    fn finalize_rejects_oversized_line() {
+        let mut p = SseParser::new();
+        // Simulate buffer that grew beyond limit through pending_bytes accumulation
+        // (feed()'s pre-allocation check normally prevents this, but finalize()
+        // must still guard against the edge case)
+        p.buffer = "a".repeat(MAX_SSE_LINE_BYTES + 1);
+        let result = p.finalize();
+        assert!(result.is_err());
     }
 
     // ── parse_sse_stream tests (F8.3.1–F8.3.4) ──────────────────────────
@@ -526,6 +638,53 @@ mod tests {
             ),
             "expected Connection error, got {:?}",
             results[1]
+        );
+    }
+
+    #[test]
+    fn finalize_returns_buffered_content_from_multiple_partial_feeds() {
+        let mut p = SseParser::new();
+        // Feed a partial data line split across two feed calls — no newline
+        p.feed(b"data: {\"delta\":{\"content\":\"part").unwrap();
+        p.feed(b"_two\"}}").unwrap();
+        let r = p.finalize().unwrap();
+        assert_eq!(r, vec!["part_two"]);
+    }
+
+    #[tokio::test]
+    async fn parse_sse_stream_flushes_buffered_content_before_error() {
+        // Complete data line, then a partial data line (no newline) that stays
+        // in the buffer, then an error. The buffered content should be flushed
+        // via finalize() before the error propagates.
+        let error = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_micros(1))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .unwrap_err();
+
+        let chunks: Vec<Result<bytes::Bytes, reqwest::Error>> = vec![
+            Ok(data_line_bytes(r#"{"delta":{"content":"hello"}}"#)),
+            Ok(b"data: {\"delta\":{\"content\":\"buffered\"}}"
+                .to_vec()
+                .into()),
+            Err(error),
+        ];
+        let stream = futures_util::stream::iter(chunks);
+        let results = collect_stream(parse_sse_stream(stream)).await;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), "hello");
+        assert_eq!(results[1].as_ref().unwrap(), "buffered");
+        assert!(
+            matches!(
+                results[2],
+                Err(crate::error::HonchoError::Connection { .. })
+            ),
+            "expected Connection error, got {:?}",
+            results[2]
         );
     }
 }
