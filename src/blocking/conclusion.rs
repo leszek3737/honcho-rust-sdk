@@ -4,6 +4,18 @@ use crate::types::conclusion::ConclusionPage;
 
 use super::runtime::block_on;
 
+// NOTE (PR6 follow-up, deferred intentionally):
+// * `Conclusion` here is a pure data wrapper that duplicates 7 getters plus
+//   `Debug`/`Display` of `crate::Conclusion`. Once a breaking release is
+//   acceptable, replace it with `pub use crate::Conclusion;`.
+// * `Conclusion::created_at()` returns `&DateTime<Utc>` to mirror the async
+//   API; `DateTime` is `Copy`, so returning by value would be more idiomatic.
+//   Changing the async signature too is breaking, hence deferred.
+// * The `Blocking*` builder prefixes below are redundant inside the
+//   `blocking::` module (`crate::ConclusionScope` already disambiguates), but
+//   renaming them alters public paths and is therefore deferred to a breaking
+//   release.
+
 /// Synchronous wrapper around [`crate::Conclusion`].
 #[derive(Clone)]
 pub struct Conclusion {
@@ -103,6 +115,17 @@ impl ConclusionScope {
     }
 
     /// Create one or more conclusions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`HonchoError`](crate::error::HonchoError) variant if the
+    /// underlying HTTP request fails (network, authentication, validation, or
+    /// server-side errors).
+    ///
+    /// Also returns
+    /// [`HonchoError::Configuration`](crate::error::HonchoError::Configuration)
+    /// when invoked from inside a tokio/async runtime; in that case use the
+    /// async [`crate::ConclusionScope`] instead.
     pub fn create(
         &self,
         conclusions: impl IntoIterator<Item = impl Into<ConclusionCreateParams>>,
@@ -136,12 +159,28 @@ impl ConclusionScope {
     }
 
     /// Delete a conclusion by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`HonchoError`](crate::error::HonchoError) variant if the
+    /// underlying HTTP request fails (network, authentication, validation, or
+    /// server-side errors).
+    ///
+    /// Also returns
+    /// [`HonchoError::Configuration`](crate::error::HonchoError::Configuration)
+    /// when invoked from inside a tokio/async runtime; in that case use the
+    /// async [`crate::ConclusionScope`] instead.
     pub fn delete(&self, conclusion_id: impl Into<String>) -> Result<()> {
         block_on(self.inner.delete(conclusion_id))?
     }
 }
 
 /// Blocking builder for scoped representation.
+///
+/// Not `Clone`: the wrapped async
+/// [`crate::conclusion::ConclusionRepresentationBuilder`] is itself not `Clone`,
+/// so deriving `Clone` here would require widening the change beyond this
+/// module. Rebuild from [`ConclusionScope::representation`] for retries.
 pub struct BlockingConclusionRepresentationBuilder {
     inner: crate::conclusion::ConclusionRepresentationBuilder,
 }
@@ -188,6 +227,17 @@ impl BlockingConclusionRepresentationBuilder {
     }
 
     /// Send the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`HonchoError`](crate::error::HonchoError) variant if the
+    /// underlying HTTP request fails (network, authentication, validation, or
+    /// server-side errors).
+    ///
+    /// Also returns
+    /// [`HonchoError::Configuration`](crate::error::HonchoError::Configuration)
+    /// when invoked from inside a tokio/async runtime; in that case use the
+    /// async [`crate::conclusion::ConclusionRepresentationBuilder`] instead.
     pub fn send(self) -> Result<String> {
         block_on(self.inner.send())?
     }
@@ -201,6 +251,10 @@ impl std::fmt::Debug for BlockingConclusionRepresentationBuilder {
 }
 
 /// Blocking builder for listing conclusions.
+///
+/// Not `Clone`: the wrapped async
+/// [`crate::conclusion::ListConclusionsBuilder`] is itself not `Clone`.
+/// Rebuild from [`ConclusionScope::list`] for retries.
 pub struct BlockingListConclusionsBuilder {
     inner: crate::conclusion::ListConclusionsBuilder,
 }
@@ -239,6 +293,17 @@ impl BlockingListConclusionsBuilder {
     }
 
     /// Send and return paginated result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`HonchoError`](crate::error::HonchoError) variant if the
+    /// underlying HTTP request fails (network, authentication, validation, or
+    /// server-side errors).
+    ///
+    /// Also returns
+    /// [`HonchoError::Configuration`](crate::error::HonchoError::Configuration)
+    /// when invoked from inside a tokio/async runtime; in that case use the
+    /// async [`crate::conclusion::ListConclusionsBuilder`] instead.
     pub fn send(self) -> Result<ConclusionPage> {
         block_on(self.inner.send())?
     }
@@ -252,6 +317,10 @@ impl std::fmt::Debug for BlockingListConclusionsBuilder {
 }
 
 /// Blocking builder for querying conclusions.
+///
+/// Not `Clone`: the wrapped async
+/// [`crate::conclusion::QueryConclusionsBuilder`] is itself not `Clone`.
+/// Rebuild from [`ConclusionScope::query`] for retries.
 pub struct BlockingQueryConclusionsBuilder {
     inner: crate::conclusion::QueryConclusionsBuilder,
 }
@@ -274,6 +343,17 @@ impl BlockingQueryConclusionsBuilder {
     }
 
     /// Send the query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`HonchoError`](crate::error::HonchoError) variant if the
+    /// underlying HTTP request fails (network, authentication, validation, or
+    /// server-side errors).
+    ///
+    /// Also returns
+    /// [`HonchoError::Configuration`](crate::error::HonchoError::Configuration)
+    /// when invoked from inside a tokio/async runtime; in that case use the
+    /// async [`crate::conclusion::QueryConclusionsBuilder`] instead.
     pub fn send(self) -> Result<Vec<Conclusion>> {
         block_on(self.inner.send())?.map(|v| v.into_iter().map(Conclusion::new).collect())
     }

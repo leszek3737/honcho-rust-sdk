@@ -71,6 +71,10 @@ required-features = ["blocking"]
 name = "blocking_smoke"
 required-features = ["blocking"]
 
+[[test]]
+name = "blocking_runtime_guard"
+required-features = ["blocking"]
+
 [package.metadata.docs.rs]
 all-features = true
 features = ["blocking", "tracing"]

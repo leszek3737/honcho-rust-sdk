@@ -5,7 +5,7 @@ use futures_util::Stream;
 use serde_json::Value;
 
 use crate::dialectic_stream::DialecticStream;
-use crate::error::Result;
+use crate::error::{HonchoError, Result};
 use crate::types::dialectic::{DialecticOptions, ReasoningLevel};
 use crate::types::message::MessageSearchOptions;
 use crate::types::pagination::Page;
@@ -14,7 +14,10 @@ use crate::types::session::{Session, SessionListOptions};
 
 use super::conclusion::ConclusionScope;
 use super::iter::{BlockingIter, collect_all_pages};
-use super::runtime::block_on;
+use super::runtime::{BLOCKING_IN_ASYNC_CTX_MSG, block_on};
+
+/// Owned, type-erased async chunk stream returned by `Peer::chat_stream`.
+type BoxedChatStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
 /// Synchronous wrapper around [`crate::Peer`].
 #[derive(Clone)]
@@ -104,6 +107,16 @@ impl Peer {
     }
 
     /// Start a streaming dialectic chat. Returns a builder; call `.send()` for an iterator.
+    ///
+    /// # Warning: blocking context
+    ///
+    /// `.send()` (and every `ChatStreamIterator::next` call) drives the
+    /// internal tokio runtime. If either is invoked from inside an active
+    /// async runtime, `.send()` returns
+    /// [`HonchoError::Configuration`] and the iterator yields the same
+    /// error as its first (and subsequent) item instead of panicking. Use
+    /// the async [`Peer::chat_stream`](crate::Peer::chat_stream) API in
+    /// async contexts.
     #[must_use]
     pub fn chat_stream(&self, query: impl Into<String>) -> BlockingChatStreamBuilder {
         BlockingChatStreamBuilder {
@@ -138,6 +151,9 @@ impl Peer {
     }
 
     /// Get the peer's context scoped to a target.
+    ///
+    /// Deprecated surrogate for [`Peer::context_builder`](Self::context_builder).
+    /// Scheduled for removal in PR6; new code should use the builder directly.
     #[deprecated(since = "0.1.1", note = "use `Peer::context_builder()` instead")]
     #[allow(deprecated)]
     pub fn context_with_target(&self, target: &str) -> Result<PeerContext> {
@@ -145,6 +161,9 @@ impl Peer {
     }
 
     /// Get the peer's context with custom options.
+    ///
+    /// Deprecated surrogate for [`Peer::context_builder`](Self::context_builder).
+    /// Scheduled for removal in PR6; new code should use the builder directly.
     #[deprecated(since = "0.1.1", note = "use `Peer::context_builder()` instead")]
     #[allow(deprecated)]
     pub fn context_with_options(
@@ -258,6 +277,7 @@ impl BlockingChatStreamBuilder {
         let stream = block_on(self.inner.send())??;
         Ok(ChatStreamIterator {
             inner: BlockingIter::new(stream),
+            complete: false,
         })
     }
 }
@@ -266,9 +286,16 @@ impl BlockingChatStreamBuilder {
 ///
 /// Wraps a [`DialecticStream`], so [`final_response`](DialecticStream::final_response)
 /// and [`is_complete`](DialecticStream::is_complete) are available after iteration.
-#[allow(clippy::type_complexity)]
 pub struct ChatStreamIterator {
-    inner: BlockingIter<DialecticStream<Pin<Box<dyn Stream<Item = Result<String>> + Send>>>>,
+    inner: BlockingIter<DialecticStream<BoxedChatStream>>,
+    /// Fused-shutdown flag, independent of the inner [`DialecticStream`]'s own
+    /// completion. Set `true` once iteration becomes impossible from the
+    /// current context (a [`block_on`](super::runtime::block_on) config
+    /// rejection) so [`next`](Iterator::next) returns `None` forever instead
+    /// of re-entering the failing poll. The inner stream is never polled in
+    /// that case, so its `complete` flag stays `false`; this local flag is
+    /// what [`is_complete`](Self::is_complete) reports.
+    complete: bool,
 }
 
 impl ChatStreamIterator {
@@ -278,18 +305,62 @@ impl ChatStreamIterator {
         self.inner.stream().final_response()
     }
 
-    /// Whether the underlying stream has ended.
+    /// Whether iteration has ended.
+    ///
+    /// `true` once either the underlying stream has returned end-of-stream
+    /// ([`DialecticStream::is_complete`]) or [`next`](Iterator::next) hit a
+    /// fatal context-rejection and fused the iterator (see [`next`](Iterator::next)).
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.inner.stream().is_complete()
+        self.complete || self.inner.stream().is_complete()
     }
 }
 
 impl Iterator for ChatStreamIterator {
     type Item = Result<String>;
 
+    /// # Errors
+    ///
+    /// Returns [`HonchoError::Configuration`] (wrapping the canonical
+    /// `BLOCKING_IN_ASYNC_CTX_MSG` constant) inside the `Err` item when iteration is
+    /// attempted from inside an async runtime context — the blocking facade
+    /// cannot enter its own runtime there. Use the async
+    /// [`Peer::chat_stream`](crate::Peer::chat_stream) API instead.
+    ///
+    /// The first such call yields `Some(Err(Configuration(_)))` and then
+    /// **fuses**: the iterator is marked complete and every subsequent
+    /// [`next`](Iterator::next) call returns `None`, so `for` loops and
+    /// [`collect`](Iterator::collect) terminate instead of spinning forever
+    /// on the un-pollable context. This fuse is independent of the inner
+    /// [`DialecticStream`]'s own end-of-stream flag (the stream is never
+    /// reached on this path).
+    ///
+    /// After the underlying stream completes or yields a `None`, subsequent
+    /// calls likewise return `None` without re-polling (the iterator is
+    /// effectively fused via the [`is_complete`](Self::is_complete) guard).
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        // Fuse: once the underlying stream reports completion (or we fused
+        // after a context-rejection — see the Err arm below), stay exhausted.
+        // Re-polling a finished `Stream` is permitted to panic per the
+        // `Stream` contract, and re-polling a rejected context would spin
+        // indefinitely, so we short-circuit here.
+        if self.is_complete() {
+            return None;
+        }
+        match self.inner.try_next() {
+            Ok(Some(item)) => Some(item),
+            Ok(None) => None,
+            Err(_) => {
+                // Context-rejection: the blocking facade cannot drive its
+                // runtime from here. Surface the error once, then fuse so a
+                // `for`/`collect` consumer terminates instead of re-entering
+                // the failing poll forever.
+                self.complete = true;
+                Some(Err(HonchoError::Configuration(
+                    BLOCKING_IN_ASYNC_CTX_MSG.to_owned(),
+                )))
+            }
+        }
     }
 }
 
@@ -437,29 +508,18 @@ impl BlockingContextBuilder {
     }
 }
 
-impl std::fmt::Debug for BlockingChatStreamBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockingChatStreamBuilder")
-            .finish_non_exhaustive()
-    }
+/// `Debug` for builders that don't expose their inner state.
+macro_rules! impl_non_exhaustive_debug {
+    ($ty:ty) => {
+        impl std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!($ty)).finish_non_exhaustive()
+            }
+        }
+    };
 }
 
-impl std::fmt::Debug for ChatStreamIterator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChatStreamIterator").finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Debug for BlockingRepresentationBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockingRepresentationBuilder")
-            .finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Debug for BlockingContextBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockingContextBuilder")
-            .finish_non_exhaustive()
-    }
-}
+impl_non_exhaustive_debug!(BlockingChatStreamBuilder);
+impl_non_exhaustive_debug!(ChatStreamIterator);
+impl_non_exhaustive_debug!(BlockingRepresentationBuilder);
+impl_non_exhaustive_debug!(BlockingContextBuilder);
