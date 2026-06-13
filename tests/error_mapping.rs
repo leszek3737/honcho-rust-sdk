@@ -200,7 +200,10 @@ fn parse_retry_after_overflow_returns_none_not_panic(#[case] raw: &str) {
     let mut headers = HeaderMap::new();
     headers.insert("retry-after", HeaderValue::from_str(raw).unwrap());
     let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
-    assert_eq!(result, None, "non-finite/overflow should be None, not panic");
+    assert_eq!(
+        result, None,
+        "non-finite/overflow should be None, not panic"
+    );
 }
 
 #[test]
