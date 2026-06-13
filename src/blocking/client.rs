@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 
 use serde_json::Value;
 use url::Url;
@@ -8,14 +7,14 @@ use crate::client::HonchoParams;
 use crate::error::Result;
 use crate::session::PeerSpec;
 use crate::types::dream::QueueStatus;
-use crate::types::pagination::{Page, validate_pagination};
+use crate::types::pagination::validate_pagination;
 use crate::types::peer::Peer as PeerResponse;
 use crate::types::session::Session as SessionResponse;
 use crate::types::workspace::WorkspaceConfiguration;
 
 use super::Peer as BlockingPeer;
 use super::Session as BlockingSession;
-use super::iter::collect_all_pages;
+use super::iter::collect_pages;
 use super::runtime::block_on;
 
 /// Synchronous wrapper around [`crate::Honcho`].
@@ -34,31 +33,6 @@ impl std::fmt::Debug for Honcho {
 }
 
 impl Honcho {
-    /// Drive an async page-producing future on the internal runtime and collect
-    /// every page it seeds into a single `Vec`. Centralises the
-    /// `block_on(async { fetch; collect_all_pages })` shape shared by all five
-    /// paginated list methods below.
-    ///
-    /// Kept as a private associated function (rather than inlined per method)
-    /// so the collect-all behaviour — and any future change to it — lives in a
-    /// single place. The return-shape parity fix with the async client is
-    /// tracked separately as a breaking change (PR6).
-    fn collect_pages<TRaw, TOut>(
-        first_page_fut: impl Future<Output = Result<Page<TRaw, TOut>>>,
-    ) -> Result<Vec<TOut>>
-    where
-        TRaw: Clone + 'static,
-        TOut: 'static,
-    {
-        // `block_on` wraps the future's output in a `Result` so the async-runtime
-        // guard can surface its `Configuration` error; `?` unwraps that outer
-        // layer, leaving the inner `collect_all_pages` result as the return value.
-        block_on(async {
-            let page = first_page_fut.await?;
-            collect_all_pages(page).await
-        })?
-    }
-
     /// Create a blocking client pointed at `base_url` for `workspace_id`.
     ///
     /// # Examples
@@ -382,7 +356,7 @@ impl Honcho {
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn peers(&self) -> Result<Vec<PeerResponse>> {
-        Self::collect_pages(self.inner.peers())
+        collect_pages(self.inner.peers())
     }
 
     /// List peers with filters, collecting across pages.
@@ -424,7 +398,7 @@ impl Honcho {
         // fails fast with a `Validation` error instead of first triggering a
         // lazy `ensure_workspace` network round-trip inside the async client.
         validate_pagination(page, size)?;
-        Self::collect_pages(self.inner.peers_with_filters(filters, page, size, reverse))
+        collect_pages(self.inner.peers_with_filters(filters, page, size, reverse))
     }
 
     /// List all sessions in the workspace, collecting across pages.
@@ -440,7 +414,7 @@ impl Honcho {
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn sessions(&self) -> Result<Vec<SessionResponse>> {
-        Self::collect_pages(self.inner.sessions())
+        collect_pages(self.inner.sessions())
     }
 
     /// List sessions with filters, collecting across pages.
@@ -482,7 +456,7 @@ impl Honcho {
         // fails fast with a `Validation` error instead of first triggering a
         // lazy `ensure_workspace` network round-trip inside the async client.
         validate_pagination(page, size)?;
-        Self::collect_pages(
+        collect_pages(
             self.inner
                 .sessions_with_filters(filters, page, size, reverse),
         )
@@ -501,6 +475,6 @@ impl Honcho {
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn workspaces(&self) -> Result<Vec<String>> {
-        Self::collect_pages(self.inner.workspaces())
+        collect_pages(self.inner.workspaces())
     }
 }

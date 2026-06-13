@@ -263,10 +263,7 @@ impl Session {
     /// Returns [`HonchoError`] on network/HTTP failure, response parse failure,
     /// or if invoked from inside an async runtime (use the async client instead).
     pub fn messages(&self) -> Result<Vec<crate::Message>> {
-        block_on(async {
-            let page = self.inner.messages().await?;
-            super::iter::collect_all_pages(page).await
-        })?
+        super::iter::collect_pages(self.inner.messages())
     }
 
     /// Delete this session.
@@ -543,6 +540,18 @@ impl Session {
 }
 
 /// Blocking wrapper around [`crate::UploadFileBuilder`].
+///
+/// # Drop behaviour
+///
+/// [`Session::upload_file_streamed`] spawns the reader thread **eagerly**, when
+/// the builder is created — not when [`send`](Self::send) is called. Dropping
+/// the builder without calling [`send`](Self::send) detaches that thread rather
+/// than joining it (a joining `Drop` could block the caller indefinitely on a
+/// stuck reader). The detached thread self-terminates once the async multipart
+/// stream is dropped and its next `reader.read()` observes the broken pipe, so
+/// a fast reader exits promptly; a slow/blocked reader lingers until its
+/// in-flight `read()` returns. Call [`send`](Self::send) to join the thread
+/// deterministically.
 pub struct BlockingUploadFileBuilder<'a> {
     inner: crate::UploadFileBuilder<'a>,
     reader_handle: Option<std::thread::JoinHandle<()>>,
@@ -595,8 +604,8 @@ impl BlockingUploadFileBuilder<'_> {
     pub fn send(self) -> Result<Vec<crate::Message>> {
         // block_on returns Result<Result<Vec<_>, HonchoError>, HonchoError>:
         // the outer error is the runtime guard / build failure, the inner is
-        // the server response. Flatten both so is_ok() reflects server success
-        // while still letting the join below run on every exit path.
+        // the server response. Flatten both so the value reflects server
+        // success while still letting the join below run on every exit path.
         let send_result = block_on(self.inner.send());
         let send_result: Result<Vec<crate::Message>> = send_result.and_then(std::convert::identity);
 
@@ -605,8 +614,16 @@ impl BlockingUploadFileBuilder<'_> {
         // thread from continuing to read the user's reader after we return.
         if let Some(handle) = self.reader_handle
             && let Err(panic_payload) = handle.join()
-            && send_result.is_ok()
         {
+            // A panic in the reader thread is an unrecoverable bug — in the
+            // user's `Read` impl or our pipe bridge — and is surfaced
+            // unconditionally, taking precedence over `send_result`. A reader
+            // panic is typically the *root cause* of any subsequent send
+            // failure (it drops the pipe write half, truncating the body or
+            // breaking the connection), so reporting it is more actionable
+            // than the downstream symptom, and a bug must never be silently
+            // swallowed behind an `Err` send result.
+            //
             // std::thread::JoinHandle::join returns Err(Box<dyn Any + Send>)
             // on a panic; downcast to preserve the panic message for diagnosis.
             let msg = panic_payload

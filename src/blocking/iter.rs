@@ -139,3 +139,31 @@ where
     }
     Ok(all)
 }
+
+/// Drive a page-producing future on the blocking runtime and collect every page
+/// it seeds into a single `Vec`.
+///
+/// Centralises the `block_on(async { fetch; collect_all_pages })` shape shared
+/// by every paginated blocking list method ([`Honcho::peers`], [`Session::messages`],
+/// [`Peer::sessions`], …). `block_on` wraps the future's output in an outer
+/// `Result` so the async-runtime guard can surface its `Configuration` error;
+/// the trailing `?` unwraps that outer layer, leaving the inner
+/// [`collect_all_pages`] result as the return value.
+///
+/// [`Honcho::peers`]: super::Honcho::peers
+/// [`Session::messages`]: super::Session::messages
+/// [`Peer::sessions`]: super::Peer::sessions
+pub(crate) fn collect_pages<TRaw, TOut>(
+    first_page_fut: impl std::future::Future<
+        Output = crate::error::Result<crate::types::pagination::Page<TRaw, TOut>>,
+    >,
+) -> crate::error::Result<Vec<TOut>>
+where
+    TRaw: Clone + 'static,
+    TOut: 'static,
+{
+    block_on(async {
+        let page = first_page_fut.await?;
+        collect_all_pages(page).await
+    })?
+}

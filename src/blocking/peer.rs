@@ -13,7 +13,7 @@ use crate::types::peer::{PeerConfig, PeerContext};
 use crate::types::session::{Session, SessionListOptions};
 
 use super::conclusion::ConclusionScope;
-use super::iter::{BlockingIter, collect_all_pages};
+use super::iter::{BlockingIter, collect_pages};
 use super::runtime::{BLOCKING_IN_ASYNC_CTX_MSG, block_on};
 
 /// Owned, type-erased async chunk stream returned by `Peer::chat_stream`.
@@ -175,10 +175,7 @@ impl Peer {
 
     /// List sessions for this peer, collecting across pages.
     pub fn sessions(&self) -> Result<Vec<Session>> {
-        block_on(async {
-            let page = self.inner.sessions().await?;
-            collect_all_pages(page).await
-        })?
+        collect_pages(self.inner.sessions())
     }
 
     /// List sessions with filters and pagination options. Returns a [`Page`].

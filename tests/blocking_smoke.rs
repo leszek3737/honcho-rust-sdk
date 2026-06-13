@@ -3,6 +3,7 @@
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::panic,
     clippy::needless_pass_by_value,
     clippy::uninlined_format_args,
     clippy::manual_range_contains,
@@ -1496,7 +1497,72 @@ async fn blocking_chat_stream_iterator_next_from_async_returns_configuration_err
     assert!(iter.next().is_none(), "fuse: expected None on repeat call");
 }
 
+// ─── reader-thread panic surfaces even when send() also fails ────────
+//
+// Guards session.rs send(): a panic in the reader thread is surfaced
+// unconditionally and takes precedence over the send result. A panicking
+// reader drops the pipe write half, truncating the body so the (unmounted)
+// upload endpoint 404s and `send()` itself returns Err — but the panic is
+// the root cause and must win, never be swallowed behind the server error.
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_upload_file_streamed_reader_panic_wins_over_send_error() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+    // Intentionally do NOT mount the upload endpoint: the truncated request
+    // 404s, so `send()` returns a server error — yet the reader panic must
+    // be the error surfaced.
+
+    let uri = server.uri();
+    let err = blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        let reader = PanickingReader::new(8);
+        // The reader thread's unwind prints to stderr via the default panic
+        // hook; that's expected noise for this test. The payload is captured
+        // by JoinHandle::join and surfaced as the returned error.
+        session
+            .upload_file_streamed("doc.txt", reader, "text/plain")
+            .peer("alice")
+            .send()
+            .unwrap_err()
+    });
+    match err {
+        honcho_ai::error::HonchoError::Io(e) => assert!(
+            e.to_string().contains("synthetic reader panic"),
+            "expected the reader panic message to be surfaced, got: {e}"
+        ),
+        other => panic!("expected HonchoError::Io carrying the panic message, got {other:?}"),
+    }
+}
+
 // ─── Test helper readers ─────────────────────────────────────────────
+
+/// Reader that yields `ok_bytes` bytes of filler, then **panics** on the next
+/// read with a `&'static str` payload (so `JoinHandle::join` returns it).
+struct PanickingReader {
+    remaining_ok: usize,
+}
+
+impl PanickingReader {
+    fn new(ok_bytes: usize) -> Self {
+        Self {
+            remaining_ok: ok_bytes,
+        }
+    }
+}
+
+impl std::io::Read for PanickingReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        assert!(self.remaining_ok != 0, "synthetic reader panic");
+        let n = buf.len().min(self.remaining_ok);
+        buf[..n].fill(b'x');
+        self.remaining_ok -= n;
+        Ok(n)
+    }
+}
 
 /// Reader that yields the first `fail_at` bytes of `data`, then returns a
 /// permanent `io::Error` on the next read.
