@@ -6,14 +6,44 @@
     missing_docs
 )]
 
+//! Tests for `from_response` status→variant mapping, `parse_error_body`,
+//! `parse_retry_after`, and the `is_retryable()` policy.
+//!
+//! `code()` coverage is split with `tests/error_methods.rs`:
+//! this file owns the `from_response`-reachable (HTTP-status-derived) variants;
+//! `error_methods.rs` owns the constructed-directly variants
+//! (`Timeout`, `Connection`, `Transport`, `Decode`, `Io`, `Configuration`,
+//! `Validation`, `PartialFailure`).
+
+use std::error::Error;
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use honcho_ai::error::{HonchoError, from_response, parse_error_body, parse_retry_after};
 use pretty_assertions::assert_eq;
+use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue};
 use rstest::rstest;
 use static_assertions::assert_impl_all;
+
+// Deterministic timestamp for tests where the instant is irrelevant.
+fn now() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+}
+
+fn status(code: u16) -> StatusCode {
+    StatusCode::from_u16(code).unwrap()
+}
+
+fn body(s: &str) -> bytes::Bytes {
+    bytes::Bytes::copy_from_slice(s.as_bytes())
+}
+
+fn from_resp(code: u16, body_str: &str) -> HonchoError {
+    from_response(status(code), &HeaderMap::new(), &body(body_str), now())
+}
+
+// === status → variant mapping ===
 
 #[rstest]
 #[case(400, "bad_request")]
@@ -23,15 +53,10 @@ use static_assertions::assert_impl_all;
 #[case(409, "conflict")]
 #[case(422, "unprocessable_entity")]
 fn status_maps_to_variant(#[case] status: u16, #[case] expected_code: &str) {
-    let status = reqwest::StatusCode::from_u16(status).unwrap();
-    let headers = HeaderMap::new();
-    let body = bytes::Bytes::from(r#"{"message":"test error"}"#);
-    let now = Utc::now();
-
-    let err = from_response(status, &headers, &body, now);
+    let err = from_resp(status, r#"{"message":"test error"}"#);
 
     assert_eq!(err.code(), expected_code);
-    match status.as_u16() {
+    match status {
         400 => assert!(matches!(err, HonchoError::BadRequest { .. })),
         401 => assert!(matches!(err, HonchoError::Authentication { .. })),
         403 => assert!(matches!(err, HonchoError::PermissionDenied { .. })),
@@ -48,19 +73,14 @@ fn status_maps_to_variant(#[case] status: u16, #[case] expected_code: &str) {
 #[case(503)]
 #[case(504)]
 fn server_5xx_maps_to_server_with_status(#[case] status: u16) {
-    let status = reqwest::StatusCode::from_u16(status).unwrap();
-    let headers = HeaderMap::new();
-    let body = bytes::Bytes::from("internal server error");
-    let now = Utc::now();
-
-    let err = from_response(status, &headers, &body, now);
+    let err = from_resp(status, "internal server error");
 
     assert!(matches!(
         err,
         HonchoError::Server {
             status: s,
             ..
-        } if s == status.as_u16()
+        } if s == status
     ));
     assert_eq!(err.code(), "server_error");
 }
@@ -71,32 +91,30 @@ fn server_5xx_maps_to_server_with_status(#[case] status: u16) {
 #[case(413)]
 #[case(418)]
 fn unmapped_4xx_maps_to_client_with_status(#[case] status: u16) {
-    let status = reqwest::StatusCode::from_u16(status).unwrap();
-    let headers = HeaderMap::new();
-    let body = bytes::Bytes::from("client error");
-    let now = Utc::now();
-
-    let err = from_response(status, &headers, &body, now);
+    let err = from_resp(status, "client error");
 
     assert!(matches!(
         err,
         HonchoError::Client {
             status: s,
             ..
-        } if s == status.as_u16()
+        } if s == status
     ));
     assert_eq!(err.code(), "client_error");
 }
 
+// === rate limit / Retry-After header parsing via from_response ===
+
 #[test]
 fn rate_limit_429_parses_retry_after_seconds() {
-    let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
     let mut headers = HeaderMap::new();
     headers.insert("retry-after", HeaderValue::from_static("7"));
-    let body = bytes::Bytes::from(r#"{"message":"rate limited"}"#);
-    let now = Utc::now();
-
-    let err = from_response(status, &headers, &body, now);
+    let err = from_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+        &body(r#"{"message":"rate limited"}"#),
+        now(),
+    );
 
     match err {
         HonchoError::RateLimit { retry_after, .. } => {
@@ -108,16 +126,17 @@ fn rate_limit_429_parses_retry_after_seconds() {
 
 #[test]
 fn rate_limit_429_parses_retry_after_http_date() {
-    let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
     let mut headers = HeaderMap::new();
-    let now = Utc.with_ymd_and_hms(2026, 10, 21, 7, 27, 55).unwrap();
     headers.insert(
         "retry-after",
-        HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        HeaderValue::from_static("Thu, 01 Jan 2026 00:00:05 GMT"),
     );
-    let body = bytes::Bytes::from(r#"{"message":"rate limited"}"#);
-
-    let err = from_response(status, &headers, &body, now);
+    let err = from_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+        &body(r#"{"message":"rate limited"}"#),
+        now(),
+    );
 
     match err {
         HonchoError::RateLimit {
@@ -133,12 +152,7 @@ fn rate_limit_429_parses_retry_after_http_date() {
 
 #[test]
 fn rate_limit_429_without_retry_after_is_none() {
-    let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
-    let headers = HeaderMap::new();
-    let body = bytes::Bytes::from(r#"{"message":"rate limited"}"#);
-    let now = Utc::now();
-
-    let err = from_response(status, &headers, &body, now);
+    let err = from_resp(429, r#"{"message":"rate limited"}"#);
 
     match err {
         HonchoError::RateLimit {
@@ -152,227 +166,322 @@ fn rate_limit_429_without_retry_after_is_none() {
 fn retry_after_with_garbage_returns_none() {
     let mut headers = HeaderMap::new();
     headers.insert("retry-after", HeaderValue::from_static("not-a-valid-value"));
-    let now = Utc::now();
-
-    let result = parse_retry_after(headers.get("retry-after").unwrap(), now);
+    let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
     assert!(result.is_none());
 }
 
-#[test]
-fn error_body_extracts_message_field_priority() {
-    let (msg, _) = parse_error_body(r#"{"detail":"d","message":"m","error":"e"}"#.as_bytes());
-    assert_eq!(msg, "d");
+// === parse_retry_after direct cases (panic regression + clamp + dates) ===
 
-    let (msg, _) = parse_error_body(r#"{"message":"m","error":"e"}"#.as_bytes());
-    assert_eq!(msg, "m");
-
-    let (msg, _) = parse_error_body(r#"{"error":"e"}"#.as_bytes());
-    assert_eq!(msg, "e");
-
-    let (msg, _) = parse_error_body(r#""plain string""#.as_bytes());
-    assert_eq!(msg, "plain string");
+#[rstest]
+#[case("7", Some(Duration::from_secs(7)))]
+#[case("0", Some(Duration::ZERO))]
+#[case("3.5", Some(Duration::from_millis(3500)))]
+fn parse_retry_after_seconds_valid(#[case] raw: &str, #[case] expected: Option<Duration>) {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_str(raw).unwrap());
+    let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
+    assert_eq!(result, expected);
 }
 
 #[rstest]
-#[case(400)]
-#[case(401)]
-#[case(404)]
-#[case(500)]
-fn display_includes_status_and_message(#[case] status: u16) {
-    let status = reqwest::StatusCode::from_u16(status).unwrap();
-    let headers = HeaderMap::new();
-    let body = bytes::Bytes::from(r#"{"message":"something went wrong"}"#);
-    let now = Utc::now();
+#[case("inf")]
+#[case("infinity")]
+#[case("1e300")]
+fn parse_retry_after_overflow_returns_none_not_panic(#[case] raw: &str) {
+    // Regression: previously `Duration::from_secs_f64` panicked on inf/overflow.
+    // Agreed contract: `try_from_secs_f64(...).ok()` → None. MUST NOT panic.
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_str(raw).unwrap());
+    let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
+    assert_eq!(result, None, "inf/overflow should be None, not panic");
+}
 
-    let err = from_response(status, &headers, &body, now);
-    let display = format!("{err}");
+#[test]
+fn parse_retry_after_negative_clamps_to_zero() {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("-5"));
+    let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
+    assert_eq!(result, Some(Duration::ZERO));
+}
 
-    assert!(
-        display.contains(&status.as_u16().to_string()),
-        "display should contain status code"
+#[test]
+fn parse_retry_after_past_http_date_is_zero() {
+    // 01 Jan 2025 is a Wednesday; `now()` is 01 Jan 2026, so this is in the past.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "retry-after",
+        HeaderValue::from_static("Wed, 01 Jan 2025 00:00:00 GMT"),
+    );
+    let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
+    assert_eq!(result, Some(Duration::ZERO));
+}
+
+#[test]
+fn parse_retry_after_future_http_date_returns_positive_diff() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "retry-after",
+        HeaderValue::from_static("Thu, 01 Jan 2026 00:00:05 GMT"),
+    );
+    let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
+    assert_eq!(result, Some(Duration::from_secs(5)));
+}
+
+// === parse_error_body ===
+
+#[test]
+fn error_body_extracts_message_field_priority() {
+    // detail > message > error
+    let (msg, body_value) =
+        parse_error_body(r#"{"detail":"d","message":"m","error":"e"}"#.as_bytes());
+    assert_eq!(msg, "d");
+    assert!(body_value.is_some());
+
+    let (msg, body_value) = parse_error_body(r#"{"message":"m","error":"e"}"#.as_bytes());
+    assert_eq!(msg, "m");
+    assert!(body_value.is_some());
+
+    let (msg, body_value) = parse_error_body(r#"{"error":"e"}"#.as_bytes());
+    assert_eq!(msg, "e");
+    assert!(body_value.is_some());
+
+    let (msg, body_value) = parse_error_body(r#""plain string""#.as_bytes());
+    assert_eq!(msg, "plain string");
+    assert!(body_value.is_some());
+}
+
+#[test]
+fn error_body_fastapi_422_array_detail_yields_readable_message() {
+    // FastAPI 422 returns detail as an array of objects. A1's `detail_message`
+    // helper joins the `msg` fields with `"; "`, producing a human-readable
+    // message instead of dumping raw JSON.
+    let raw = r#"{"detail":[{"loc":["body","x"],"msg":"field required"}]}"#;
+    let (msg, body_value) = parse_error_body(raw.as_bytes());
+    assert_eq!(
+        msg, "field required",
+        "readable form (detail_message helper)"
     );
     assert!(
-        display.contains("something went wrong"),
-        "display should contain message"
+        body_value.is_some(),
+        "valid JSON must round-trip body_value"
+    );
+    let value = body_value.unwrap();
+    assert!(
+        value.get("detail").and_then(|v| v.as_array()).is_some(),
+        "body should preserve the detail array"
     );
 }
 
 #[test]
-fn error_code_is_stable_string() {
-    let codes = [
-        (
-            "bad_request",
-            HonchoError::BadRequest {
-                message: String::new(),
-                body: None,
-            },
-        ),
-        (
-            "authentication_error",
-            HonchoError::Authentication {
-                message: String::new(),
-            },
-        ),
-        (
-            "permission_denied",
-            HonchoError::PermissionDenied {
-                message: String::new(),
-            },
-        ),
-        (
-            "not_found",
-            HonchoError::NotFound {
-                message: String::new(),
-            },
-        ),
-        (
-            "conflict",
-            HonchoError::Conflict {
-                message: String::new(),
-                body: None,
-            },
-        ),
-        (
-            "unprocessable_entity",
-            HonchoError::UnprocessableEntity {
-                message: String::new(),
-                body: None,
-            },
-        ),
-        (
-            "rate_limit_exceeded",
-            HonchoError::RateLimit {
-                message: String::new(),
-                retry_after: None,
-            },
-        ),
-        (
-            "server_error",
-            HonchoError::Server {
-                status: 500,
-                message: String::new(),
-            },
-        ),
-        (
-            "client_error",
-            HonchoError::Client {
-                status: 405,
-                message: String::new(),
-            },
-        ),
-        (
-            "timeout",
-            HonchoError::Timeout {
-                message: String::new(),
-            },
-        ),
-        (
-            "connection_error",
-            HonchoError::Connection {
-                message: String::new(),
-            },
-        ),
-    ];
+fn error_body_invalid_json_returns_lossy_message_and_no_body() {
+    let raw = "not valid json {";
+    let (msg, body_value) = parse_error_body(raw.as_bytes());
+    assert_eq!(msg, raw);
+    assert!(body_value.is_none(), "invalid JSON must yield None body");
+}
 
-    for (expected_code, err) in codes {
-        assert_eq!(err.code(), expected_code, "mismatch for {expected_code}");
+#[test]
+fn error_body_empty_object_returns_json_string_and_body() {
+    let raw = "{}";
+    let (msg, body_value) = parse_error_body(raw.as_bytes());
+    assert_eq!(msg, raw);
+    assert!(body_value.is_some());
+}
+
+// === display: strict "HTTP {status}" prefix ===
+
+#[rstest]
+#[case(400, "Honcho API error: HTTP 400 something went wrong")]
+#[case(401, "Honcho API error: HTTP 401 something went wrong")]
+#[case(404, "Honcho API error: HTTP 404 something went wrong")]
+#[case(500, "Honcho API error: HTTP 500 something went wrong")]
+fn display_includes_status_and_message_strict_prefix(#[case] code: u16, #[case] expected: &str) {
+    let err = from_resp(code, r#"{"message":"something went wrong"}"#);
+    let display = format!("{err}");
+    assert_eq!(display, expected);
+}
+
+// === non-JSON body path: pin lossy-fallback text ===
+
+#[test]
+fn non_json_body_uses_lossy_fallback_text() {
+    let err = from_resp(500, "internal server error");
+    match err {
+        HonchoError::Server { message, .. } => {
+            assert_eq!(message, "internal server error");
+        }
+        _ => panic!("expected Server, got {err:?}"),
     }
 }
 
+// === code() — from_response-reachable variants (A2 split) ===
+//
+// Constructed-directly variants (Timeout, Connection, Transport, Decode, Io,
+// Configuration, Validation, PartialFailure) are covered in tests/error_methods.rs.
+
+#[test]
+fn code_from_response_reachable_variants() {
+    let cases: [(&HonchoError, &str); 9] = [
+        (
+            &HonchoError::BadRequest {
+                message: String::new(),
+                body: None,
+            },
+            "bad_request",
+        ),
+        (
+            &HonchoError::Authentication {
+                message: String::new(),
+            },
+            "authentication_error",
+        ),
+        (
+            &HonchoError::PermissionDenied {
+                message: String::new(),
+            },
+            "permission_denied",
+        ),
+        (
+            &HonchoError::NotFound {
+                message: String::new(),
+            },
+            "not_found",
+        ),
+        (
+            &HonchoError::Conflict {
+                message: String::new(),
+                body: None,
+            },
+            "conflict",
+        ),
+        (
+            &HonchoError::UnprocessableEntity {
+                message: String::new(),
+                body: None,
+            },
+            "unprocessable_entity",
+        ),
+        (
+            &HonchoError::RateLimit {
+                message: String::new(),
+                retry_after: None,
+            },
+            "rate_limit_exceeded",
+        ),
+        (
+            &HonchoError::Server {
+                status: 500,
+                message: String::new(),
+            },
+            "server_error",
+        ),
+        (
+            &HonchoError::Client {
+                status: 405,
+                message: String::new(),
+            },
+            "client_error",
+        ),
+    ];
+
+    for (err, expected) in cases {
+        assert_eq!(err.code(), expected, "mismatch for {expected}");
+    }
+}
+
+// === is_retryable policy matrix ===
+
 #[rstest]
-#[case(
-    HonchoError::RateLimit {
-        message: String::new(),
-        retry_after: None,
-    },
-    true
-)]
-#[case(
-    HonchoError::Server {
-        status: 500,
-        message: String::new(),
-    },
-    true
-)]
-#[case(
-    HonchoError::Server {
-        status: 502,
-        message: String::new(),
-    },
-    true
-)]
-#[case(
-    HonchoError::Server {
-        status: 503,
-        message: String::new(),
-    },
-    true
-)]
-#[case(
-    HonchoError::Server {
-        status: 504,
-        message: String::new(),
-    },
-    true
-)]
-#[case(
-    HonchoError::Server {
-        status: 501,
-        message: String::new(),
-    },
-    false
-)]
-#[case(
-    HonchoError::BadRequest {
-        message: String::new(),
-        body: None,
-    },
-    false
-)]
-#[case(
-    HonchoError::Timeout {
-        message: String::new(),
-    },
-    true
-)]
-#[case(
-    HonchoError::Connection {
-        message: String::new(),
-    },
-    true
-)]
+#[case(HonchoError::RateLimit { message: String::new(), retry_after: None }, true)]
+#[case(HonchoError::Server { status: 500, message: String::new() }, true)]
+#[case(HonchoError::Server { status: 502, message: String::new() }, true)]
+#[case(HonchoError::Server { status: 503, message: String::new() }, true)]
+#[case(HonchoError::Server { status: 504, message: String::new() }, true)]
+#[case(HonchoError::Server { status: 501, message: String::new() }, false)]
+#[case(HonchoError::BadRequest { message: String::new(), body: None }, false)]
+#[case(HonchoError::Authentication { message: String::new() }, false)]
+#[case(HonchoError::PermissionDenied { message: String::new() }, false)]
+#[case(HonchoError::NotFound { message: String::new() }, false)]
+#[case(HonchoError::Conflict { message: String::new(), body: None }, false)]
+#[case(HonchoError::UnprocessableEntity { message: String::new(), body: None }, false)]
+#[case(HonchoError::Client { status: 405, message: String::new() }, false)]
+#[case(HonchoError::Timeout { message: String::new() }, true)]
+#[case(HonchoError::Connection { message: String::new() }, true)]
+// Constructed-directly non-status variants:
+#[case(HonchoError::Configuration("bad".into()), false)]
+#[case(HonchoError::Validation("bad".into()), false)]
 fn retryable_policy_matches_http_client(#[case] err: HonchoError, #[case] expected: bool) {
     assert_eq!(err.is_retryable(), expected);
 }
 
-use std::error::Error;
+#[test]
+fn retryable_decode_and_io_variants_are_false() {
+    let json_err = serde_json::from_str::<Vec<i32>>("{}").unwrap_err();
+    let decode = HonchoError::Decode {
+        path: "root".into(),
+        source: json_err,
+    };
+    assert!(!decode.is_retryable());
+
+    let io = std::io::Error::other("boom");
+    let io_err = HonchoError::Io(io);
+    assert!(!io_err.is_retryable());
+}
+
+#[test]
+fn partial_failure_is_never_retryable_even_if_inner_is() {
+    // Agreed contract: PartialFailure → false regardless of inner error kind.
+    // Proves consistency vs the old accidental mix where {Server 503} was
+    // retryable via status_code() delegation but {Timeout} was not.
+    let partial_server_503 = HonchoError::PartialFailure {
+        messages: vec![],
+        sent: 0,
+        error: Box::new(HonchoError::Server {
+            status: 503,
+            message: "boom".into(),
+        }),
+    };
+    assert!(
+        !partial_server_503.is_retryable(),
+        "PartialFailure wrapping Server 503 must not be retryable"
+    );
+
+    let partial_timeout = HonchoError::PartialFailure {
+        messages: vec![],
+        sent: 0,
+        error: Box::new(HonchoError::Timeout {
+            message: "slow".into(),
+        }),
+    };
+    assert!(
+        !partial_timeout.is_retryable(),
+        "PartialFailure wrapping Timeout must not be retryable"
+    );
+}
+
+// === Transport variant: non-retryable + source chain ===
+//
+// Constructed via URL parse failure — no real socket is opened; the request
+// builder rejects the malformed URL before any I/O.
 
 #[tokio::test]
-async fn source_chain_for_transport_and_io_and_decode() {
+async fn transport_error_from_url_parse_is_not_retryable_with_source() {
     let transport_err: HonchoError = reqwest::Client::new()
-        .get("http://0.0.0.0:1")
+        .get("ht!tp://[invalid")
         .send()
         .await
         .unwrap_err()
         .into();
-    assert!(transport_err.source().is_some());
-    assert!(!transport_err.is_retryable());
-
-    let json_err = serde_json::from_str::<Vec<i32>>("{}").unwrap_err();
-    let decode_err = HonchoError::Decode {
-        path: "root".to_string(),
-        source: json_err,
-    };
-    assert!(decode_err.source().is_some());
-
-    let bad_request = HonchoError::BadRequest {
-        message: String::new(),
-        body: None,
-    };
-    assert!(bad_request.source().is_none());
+    assert!(!transport_err.is_retryable(), "Transport is non-retryable");
+    assert!(
+        transport_err.source().is_some(),
+        "Transport wraps reqwest::Error (source chain)"
+    );
 }
+
+// === bounds ===
 
 #[test]
 fn error_bounds() {
-    assert_impl_all!(HonchoError: Send, Sync, std::error::Error);
+    assert_impl_all!(HonchoError: Send, Sync, Error);
 }
