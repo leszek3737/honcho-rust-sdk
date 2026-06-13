@@ -659,6 +659,8 @@ async fn blocking_peer_representation_builder_with_options() {
 async fn blocking_client_get_configuration() {
     let server = MockServer::start().await;
 
+    mount_ensure_ws(&server).await;
+
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ws_json_with_config()))
@@ -935,6 +937,8 @@ async fn blocking_client_delete_workspace() {
 async fn blocking_client_get_metadata() {
     let server = MockServer::start().await;
 
+    mount_ensure_ws(&server).await;
+
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -979,6 +983,8 @@ async fn blocking_client_set_metadata() {
 #[tokio::test]
 async fn blocking_client_refresh() {
     let server = MockServer::start().await;
+
+    mount_ensure_ws(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/ws1"))

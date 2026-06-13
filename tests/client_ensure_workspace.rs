@@ -32,6 +32,8 @@ async fn ensure_workspace_called_once_per_instance() {
     let server = MockServer::start().await;
     let create_body = serde_json::json!({"id": "ws1"});
 
+    // The lazy `ensure_workspace()` path (driven here by `get_configuration_raw`)
+    // is single-flight: the ensure POST is issued at most once per client.
     Mock::given(method("POST"))
         .and(path("/v3/workspaces"))
         .and(body_json(&create_body))
@@ -40,10 +42,17 @@ async fn ensure_workspace_called_once_per_instance() {
         .mount(&server)
         .await;
 
+    // `get_configuration_raw` fetches the workspace after ensuring it.
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_json()))
+        .mount(&server)
+        .await;
+
     let honcho = honcho(&server, "ws1");
 
-    honcho.force_ensure().await.unwrap();
-    honcho.force_ensure().await.unwrap();
+    honcho.get_configuration_raw().await.unwrap();
+    honcho.get_configuration_raw().await.unwrap();
 
     server.verify().await;
 }
@@ -53,6 +62,8 @@ async fn ensure_workspace_concurrent_calls_only_one_request() {
     let server = MockServer::start().await;
     let create_body = serde_json::json!({"id": "ws1"});
 
+    // Concurrent public calls race on the lazy ensure; the 50ms delay widens the
+    // window. Single-flight must still collapse them to one ensure POST.
     Mock::given(method("POST"))
         .and(path("/v3/workspaces"))
         .and(body_json(&create_body))
@@ -65,12 +76,18 @@ async fn ensure_workspace_concurrent_calls_only_one_request() {
         .mount(&server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_json()))
+        .mount(&server)
+        .await;
+
     let honcho = honcho(&server, "ws1");
 
     let handles: Vec<_> = (0..5)
         .map(|_| {
             let h = honcho.clone();
-            tokio::spawn(async move { h.force_ensure().await })
+            tokio::spawn(async move { h.get_configuration_raw().await })
         })
         .collect();
 

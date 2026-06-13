@@ -1,13 +1,11 @@
 //! Session wrapper — construction, metadata, peer management, per-peer config.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
 use reqwest::Method;
 use reqwest::multipart::Form;
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::{HonchoError, Result};
@@ -21,19 +19,51 @@ use crate::types::session::{
 };
 use crate::upload::FileSource;
 
+/// Single-lock cache of the server-owned session state.
+///
+/// Wrapping all mutable fields in one [`RwLock`] keeps them consistent: a
+/// refresh/PUT response updates every field under one write, so readers never
+/// observe a torn mix of fresh and stale fields.
+#[derive(Default)]
+struct SessionCacheState {
+    metadata: Option<HashMap<String, Value>>,
+    configuration: Option<SessionConfiguration>,
+    is_active: bool,
+}
+
 pub(crate) struct SessionInner {
     http: HttpClient,
-    // PERF: workspace_id is cloned per Message/Peer/Session creation (~11 call sites).
-    // Switching to Arc<str> would eliminate String clones but ripples through Honcho,
-    // Peer, Session, Message, Conclusion, and all builder types. The current cost is
-    // negligible for typical workloads (<100 messages). Revisit if profiling shows
-    // allocation pressure in hot loops (e.g., bulk message import).
-    workspace_id: String,
+    // Stored as `Arc<str>` so per-Message/Peer/Session clones are refcount bumps
+    // rather than allocations. Public method signatures keep taking `String`, so
+    // boundary conversions still allocate; this only removes the internal churn.
+    workspace_id: Arc<str>,
     id: String,
-    is_active: AtomicBool,
-    metadata: RwLock<Option<HashMap<String, Value>>>,
-    configuration: RwLock<Option<SessionConfiguration>>,
+    cache: RwLock<SessionCacheState>,
     created_at: DateTime<Utc>,
+}
+
+impl SessionInner {
+    /// Acquire the cache read lock, recovering from poisoning instead of panicking.
+    fn read_lock(&self) -> std::sync::RwLockReadGuard<'_, SessionCacheState> {
+        self.cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Acquire the cache write lock, recovering from poisoning instead of panicking.
+    fn write_lock(&self) -> std::sync::RwLockWriteGuard<'_, SessionCacheState> {
+        self.cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Atomically replace every cached field from a fresh server response.
+    fn update_cache(&self, resp: &SessionResponse) {
+        let mut cache = self.write_lock();
+        cache.metadata = Some(resp.metadata.clone());
+        cache.configuration = Some(resp.configuration.clone());
+        cache.is_active = resp.is_active;
+    }
 }
 
 /// A session in a Honcho workspace.
@@ -56,14 +86,6 @@ pub enum PeerSpec {
     Id(String),
     /// A peer identified by ID with per-session configuration.
     WithConfig(String, SessionPeerConfig),
-}
-
-impl PeerSpec {
-    fn id(&self) -> &str {
-        match self {
-            Self::Id(id) | Self::WithConfig(id, _) => id,
-        }
-    }
 }
 
 impl From<&str> for PeerSpec {
@@ -94,17 +116,6 @@ impl From<(&str, SessionPeerConfig)> for PeerSpec {
     fn from((id, cfg): (&str, SessionPeerConfig)) -> Self {
         Self::WithConfig(id.to_owned(), cfg)
     }
-}
-
-#[derive(Deserialize)]
-struct PeersPageResponse {
-    items: Vec<crate::types::peer::Peer>,
-    #[serde(default)]
-    #[expect(dead_code)]
-    total: u64,
-    #[serde(default)]
-    #[expect(dead_code)]
-    pages: u64,
 }
 
 /// Builder for the file-upload operation returned by [`Session::upload_file`].
@@ -158,6 +169,48 @@ fn serialize_upload_fields(
     })
 }
 
+/// Derive the multipart filename for a `Path` upload, rejecting paths with no
+/// final file-name component.
+///
+/// A bare root (`/`) or a trailing `..` has no file name; uploading it would
+/// send an empty/absent filename. Surfacing it as [`HonchoError::Validation`]
+/// here lets the production upload path fail fast before any request is made.
+fn derive_path_filename(path: &std::path::Path) -> Result<String> {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| {
+            HonchoError::Validation(format!(
+                "file source path has no file name component: {}",
+                path.display()
+            ))
+        })
+}
+
+/// Build a multipart form for an in-memory (`Bytes`) upload payload.
+///
+/// The payload is a [`bytes::Bytes`], so each retry clones it as a cheap
+/// refcount bump rather than copying the buffer. An invalid `content_type`
+/// is surfaced as [`HonchoError::Validation`] instead of being silently dropped.
+fn build_form(
+    filename: String,
+    bytes: bytes::Bytes,
+    content_type: &str,
+    peer_id: String,
+    add_text_fields: impl Fn(Form) -> Form,
+) -> Result<Form> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let value = reqwest::header::HeaderValue::from_str(content_type)
+        .map_err(|_| HonchoError::Validation("invalid content_type".into()))?;
+    headers.insert(reqwest::header::CONTENT_TYPE, value);
+
+    let file_part = reqwest::multipart::Part::stream(reqwest::Body::from(bytes))
+        .file_name(filename)
+        .headers(headers);
+    let form = Form::new().part("file", file_part).text("peer_id", peer_id);
+    Ok(add_text_fields(form))
+}
+
 impl UploadFileBuilder<'_> {
     /// Set the peer that owns the uploaded file (required).
     ///
@@ -205,7 +258,7 @@ impl UploadFileBuilder<'_> {
         self
     }
 
-    /// Override the creation timestamp (ISO 3339).
+    /// Override the creation timestamp (RFC 3339).
     ///
     /// # Examples
     ///
@@ -244,65 +297,52 @@ impl UploadFileBuilder<'_> {
         feature = "tracing",
         tracing::instrument(skip(self), name = "upload_file_send")
     )]
-    #[allow(clippy::missing_panics_doc)]
     pub async fn send(self) -> Result<Vec<crate::Message>> {
-        if self.peer_id.is_none() {
-            return Err(HonchoError::Validation("peer_id is required".into()));
-        }
-        if self.source.is_none() {
-            return Err(HonchoError::Validation("file source is required".into()));
-        }
-
         let add_text_fields = serialize_upload_fields(&self)?;
 
-        #[allow(clippy::expect_used)]
-        let peer_id = self.peer_id.expect("peer_id validated above");
-        #[allow(clippy::expect_used)]
-        let source = self.source.expect("source validated above");
+        let Some(peer_id) = self.peer_id else {
+            return Err(HonchoError::Validation("peer_id is required".into()));
+        };
+        let Some(source) = self.source else {
+            return Err(HonchoError::Validation("file source is required".into()));
+        };
 
-        // FileSource::Path — Part::file() streams from disk, re-opens on retry.
-        // FileSource::Stream — must buffer: AsyncRead consumed once, not replayable.
-        // FileSource::Bytes — already in memory.
-        type FormFactory = Box<
-            dyn Fn() -> std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<Form>> + Send + 'static>,
-                > + Send
-                + 'static,
-        >;
-        let form_factory: FormFactory = match source {
-            FileSource::Path(path) => Box::new(move || {
-                let path = path.clone();
-                let peer_id = peer_id.clone();
-                let add_text_fields = add_text_fields.clone();
-                Box::pin(async move {
-                    let mut file_part = reqwest::multipart::Part::file(&path)
-                        .await
-                        .map_err(HonchoError::from)?;
-                    if let Some(name) = path.file_name() {
-                        file_part = file_part.file_name(name.to_string_lossy().into_owned());
-                    }
-                    let form = Form::new().part("file", file_part).text("peer_id", peer_id);
-                    Ok(add_text_fields(form))
-                })
-            }),
+        // Normalize the source to a single in-memory representation: `Stream` is
+        // buffered into `Bytes` here so the form-building match has only two arms
+        // (disk-streamed `Path` vs. in-memory `Bytes`). The `Bytes` payload makes
+        // per-retry clones cheap refcount bumps instead of full buffer copies.
+        enum Resolved {
+            Path {
+                path: std::path::PathBuf,
+                filename: String,
+            },
+            Bytes {
+                filename: String,
+                bytes: bytes::Bytes,
+                content_type: String,
+            },
+        }
+
+        let resolved = match source {
+            FileSource::Path(path) => {
+                // Derive (and validate) the multipart filename up front so an
+                // unnamed path fails fast before any request is attempted.
+                let filename = derive_path_filename(&path)?;
+                Resolved::Path { path, filename }
+            }
             FileSource::Bytes {
                 filename,
                 bytes,
                 content_type,
-            } => Box::new(move || {
-                let mut headers = reqwest::header::HeaderMap::new();
-                if let Ok(val) = reqwest::header::HeaderValue::from_str(&content_type) {
-                    headers.insert(reqwest::header::CONTENT_TYPE, val);
-                }
-                let file_part = reqwest::multipart::Part::bytes(bytes.clone())
-                    .file_name(filename.clone())
-                    .headers(headers);
-                let form = Form::new()
-                    .part("file", file_part)
-                    .text("peer_id", peer_id.clone());
-                let form = add_text_fields(form);
-                Box::pin(async move { Ok(form) })
-            }),
+            } => Resolved::Bytes {
+                filename,
+                // `FileSource::Bytes` carries a `Vec<u8>` (kept non-breaking in the
+                // public API). Convert it to `bytes::Bytes` exactly once here, before
+                // the retry closure is built, so each retry clones a cheap refcount
+                // handle (`Bytes::clone`) instead of copying the whole buffer.
+                bytes: bytes::Bytes::from(bytes),
+                content_type,
+            },
             FileSource::Stream {
                 filename,
                 mut reader,
@@ -312,21 +352,53 @@ impl UploadFileBuilder<'_> {
                 tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buf)
                     .await
                     .map_err(HonchoError::from)?;
-                Box::new(move || {
-                    let mut headers = reqwest::header::HeaderMap::new();
-                    if let Ok(val) = reqwest::header::HeaderValue::from_str(&content_type) {
-                        headers.insert(reqwest::header::CONTENT_TYPE, val);
-                    }
-                    let file_part = reqwest::multipart::Part::bytes(buf.clone())
-                        .file_name(filename.clone())
-                        .headers(headers);
-                    let form = Form::new()
-                        .part("file", file_part)
-                        .text("peer_id", peer_id.clone());
-                    let form = add_text_fields(form);
-                    Box::pin(async move { Ok(form) })
-                })
+                Resolved::Bytes {
+                    filename,
+                    bytes: bytes::Bytes::from(buf),
+                    content_type,
+                }
             }
+        };
+
+        // FileSource::Path — Part::file() streams from disk, re-opens on retry.
+        // Resolved::Bytes — in-memory payload, cheap to clone per retry.
+        type FormFactory = Box<
+            dyn Fn() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<Form>> + Send + 'static>,
+                > + Send
+                + 'static,
+        >;
+        let form_factory: FormFactory = match resolved {
+            Resolved::Path { path, filename } => Box::new(move || {
+                let path = path.clone();
+                let filename = filename.clone();
+                let peer_id = peer_id.clone();
+                let add_text_fields = add_text_fields.clone();
+                Box::pin(async move {
+                    // `Part::file` streams the body straight from disk (re-opened
+                    // on each retry) — the file is never buffered into memory.
+                    let file_part = reqwest::multipart::Part::file(&path)
+                        .await
+                        .map_err(HonchoError::from)?
+                        .file_name(filename);
+                    let form = Form::new().part("file", file_part).text("peer_id", peer_id);
+                    Ok(add_text_fields(form))
+                })
+            }),
+            Resolved::Bytes {
+                filename,
+                bytes,
+                content_type,
+            } => Box::new(move || {
+                let filename = filename.clone();
+                let bytes = bytes.clone();
+                let content_type = content_type.clone();
+                let peer_id = peer_id.clone();
+                let add_text_fields = add_text_fields.clone();
+                Box::pin(async move {
+                    build_form(filename, bytes, &content_type, peer_id, add_text_fields)
+                })
+            }),
         };
 
         let route =
@@ -341,7 +413,7 @@ impl UploadFileBuilder<'_> {
 
         Ok(responses
             .into_iter()
-            .map(|r| crate::Message::from_raw(self.session.inner.workspace_id.clone(), r))
+            .map(crate::Message::from_raw)
             .collect())
     }
 }
@@ -355,11 +427,13 @@ impl Session {
         Self {
             inner: Arc::new(SessionInner {
                 http,
-                workspace_id,
+                workspace_id: Arc::from(workspace_id),
                 id: resp.id,
-                is_active: AtomicBool::new(resp.is_active),
-                metadata: RwLock::new(Some(resp.metadata)),
-                configuration: RwLock::new(Some(resp.configuration)),
+                cache: RwLock::new(SessionCacheState {
+                    metadata: Some(resp.metadata),
+                    configuration: Some(resp.configuration),
+                    is_active: resp.is_active,
+                }),
                 created_at: resp.created_at,
             }),
         }
@@ -400,7 +474,7 @@ impl Session {
     /// ```
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.inner.is_active.load(Ordering::Relaxed)
+        self.inner.read_lock().is_active
     }
 
     /// Cached metadata from the last API response.
@@ -416,11 +490,7 @@ impl Session {
     /// ```
     #[must_use]
     pub fn metadata(&self) -> Option<HashMap<String, Value>> {
-        self.inner
-            .metadata
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.inner.read_lock().metadata.clone()
     }
 
     /// Cached configuration from the last API response.
@@ -436,11 +506,7 @@ impl Session {
     /// ```
     #[must_use]
     pub fn configuration(&self) -> Option<SessionConfiguration> {
-        self.inner
-            .configuration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.inner.read_lock().configuration.clone()
     }
 
     /// When the session was created.
@@ -470,35 +536,28 @@ impl Session {
     /// # }
     /// ```
     pub async fn refresh(&self) -> Result<()> {
-        let body = crate::types::session::SessionCreate {
-            id: self.inner.id.clone(),
-            metadata: None,
-            peers: None,
-            configuration: None,
-        };
+        self.refresh_into().await?;
+        Ok(())
+    }
+
+    /// GET the current session state, refresh the cache, and return the response.
+    ///
+    /// Uses `GET /sessions/{id}` (read-only) rather than the get-or-create POST,
+    /// so a session deleted on the server surfaces as a `404`/`NotFound` instead
+    /// of being silently recreated. Callers that need the fresh metadata or
+    /// configuration should read it from the returned response to avoid a
+    /// refresh-then-read race against concurrent writers.
+    async fn refresh_into(&self) -> Result<SessionResponse> {
         let resp: SessionResponse = self
             .inner
             .http
-            .post(
-                &routes::sessions(&self.inner.workspace_id)?,
-                Some(&body),
+            .get(
+                &routes::session(&self.inner.workspace_id, &self.inner.id)?,
                 &[],
             )
             .await?;
-        self.inner
-            .is_active
-            .store(resp.is_active, Ordering::Relaxed);
-        *self
-            .inner
-            .metadata
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.metadata);
-        *self
-            .inner
-            .configuration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.configuration);
-        Ok(())
+        self.inner.update_cache(&resp);
+        Ok(resp)
     }
 
     /// Fetch and return the session's metadata, updating the cache.
@@ -512,14 +571,8 @@ impl Session {
     /// # }
     /// ```
     pub async fn get_metadata(&self) -> Result<HashMap<String, Value>> {
-        self.refresh().await?;
-        Ok(self
-            .inner
-            .metadata
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default())
+        let resp = self.refresh_into().await?;
+        Ok(resp.metadata)
     }
 
     /// Set session metadata on the server and update the cache.
@@ -545,11 +598,7 @@ impl Session {
                 &[],
             )
             .await?;
-        *self
-            .inner
-            .metadata
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.metadata);
+        self.inner.update_cache(&resp);
         Ok(())
     }
 
@@ -564,14 +613,8 @@ impl Session {
     /// # }
     /// ```
     pub async fn get_configuration(&self) -> Result<SessionConfiguration> {
-        self.refresh().await?;
-        Ok(self
-            .inner
-            .configuration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default())
+        let resp = self.refresh_into().await?;
+        Ok(resp.configuration)
     }
 
     /// Set session configuration on the server and update the cache.
@@ -600,11 +643,7 @@ impl Session {
                 &[],
             )
             .await?;
-        *self
-            .inner
-            .configuration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.configuration);
+        self.inner.update_cache(&resp);
         Ok(())
     }
 
@@ -614,18 +653,11 @@ impl Session {
     /// Use this when the server returns fields not yet represented in
     /// [`SessionConfiguration`].
     pub async fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
-        let body = crate::types::session::SessionCreate {
-            id: self.inner.id.clone(),
-            metadata: None,
-            peers: None,
-            configuration: None,
-        };
         let raw: serde_json::Value = self
             .inner
             .http
-            .post(
-                &routes::sessions(&self.inner.workspace_id)?,
-                Some(&body),
+            .get(
+                &routes::session(&self.inner.workspace_id, &self.inner.id)?,
                 &[],
             )
             .await?;
@@ -653,11 +685,7 @@ impl Session {
                 &[],
             )
             .await?;
-        *self
-            .inner
-            .configuration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.configuration);
+        self.inner.update_cache(&resp);
         Ok(())
     }
 
@@ -740,6 +768,11 @@ impl Session {
 
     /// List peers in this session.
     ///
+    /// This call is **all-or-nothing**: it walks every page and deserializes each
+    /// peer. If any single peer fails to deserialize (`Peer::from_parts` errors),
+    /// the whole call returns that error and the peers already accumulated from
+    /// earlier pages are discarded — partial results are never returned.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -752,18 +785,36 @@ impl Session {
     /// # }
     /// ```
     pub async fn peers(&self) -> Result<Vec<crate::Peer>> {
+        use crate::types::pagination::PageResponse;
+
         let route = routes::session_peers(&self.inner.workspace_id, &self.inner.id)?;
-        let page: PeersPageResponse = self.inner.http.get(&route, &[]).await?;
-        page.items
-            .into_iter()
-            .map(|resp| {
-                crate::Peer::from_parts(
+        let mut all = Vec::new();
+        let mut page: u64 = 1;
+        loop {
+            let page_str = page.to_string();
+            let resp: PageResponse<crate::types::peer::Peer> = self
+                .inner
+                .http
+                .get(&route, &[("page", page_str.as_str())])
+                .await?;
+            let total_pages = resp.pages;
+            let was_empty = resp.items.is_empty();
+            for item in resp.items {
+                all.push(crate::Peer::from_parts(
                     self.inner.http.clone(),
-                    self.inner.workspace_id.clone(),
-                    resp,
-                )
-            })
-            .collect()
+                    self.inner.workspace_id.to_string(),
+                    item,
+                )?);
+            }
+            // Stop once we have walked every page. `was_empty` guards against a
+            // server reporting a page count larger than the items it returns,
+            // which would otherwise loop forever.
+            if was_empty || page >= total_pages {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all)
     }
 
     // ── F6.3: Per-peer configuration ───────────────────────────────────
@@ -844,8 +895,15 @@ impl Session {
             self.inner.http.post(&route, Some(&body), &[]).await?
         } else {
             let mut all = Vec::with_capacity(messages.len());
-            for chunk in messages.chunks(100) {
-                let batch = chunk.to_vec();
+            // Drain owned messages 100 at a time instead of cloning each chunk:
+            // `by_ref().take(100)` moves each batch out of the iterator.
+            let mut iter = messages.into_iter();
+            loop {
+                let batch: Vec<crate::types::message::MessageCreate> =
+                    iter.by_ref().take(100).collect();
+                if batch.is_empty() {
+                    break;
+                }
                 let body = crate::types::message::MessageBatchCreate { messages: batch };
                 match self
                     .inner
@@ -857,10 +915,8 @@ impl Session {
                     Err(e) if all.is_empty() => return Err(e),
                     Err(e) => {
                         let sent = all.len();
-                        let partial: Vec<Message> = all
-                            .into_iter()
-                            .map(|r| Message::from_raw(self.inner.workspace_id.clone(), r))
-                            .collect();
+                        let partial: Vec<Message> =
+                            all.into_iter().map(Message::from_raw).collect();
                         return Err(HonchoError::PartialFailure {
                             messages: partial,
                             sent,
@@ -872,10 +928,7 @@ impl Session {
             all
         };
 
-        Ok(responses
-            .into_iter()
-            .map(|r| Message::from_raw(self.inner.workspace_id.clone(), r))
-            .collect())
+        Ok(responses.into_iter().map(Message::from_raw).collect())
     }
 
     /// List messages in this session with default pagination (no filters, page 1, size 50).
@@ -936,8 +989,7 @@ impl Session {
                 reverse,
             )
             .await?;
-        let ws = self.inner.workspace_id.clone();
-        Ok(result.map(move |r| Message::from_raw(ws.clone(), r)))
+        Ok(result.map(Message::from_raw))
     }
 
     // ── F7.3: File upload ───────────────────────────────────────────────
@@ -1036,7 +1088,7 @@ impl Session {
         let resp: SessionResponse = self.inner.http.post(&route, None::<&Value>, &[]).await?;
         Ok(Self::from_parts(
             self.inner.http.clone(),
-            self.inner.workspace_id.clone(),
+            self.inner.workspace_id.to_string(),
             resp,
         ))
     }
@@ -1061,7 +1113,7 @@ impl Session {
             .await?;
         Ok(Self::from_parts(
             self.inner.http.clone(),
-            self.inner.workspace_id.clone(),
+            self.inner.workspace_id.to_string(),
             resp,
         ))
     }
@@ -1081,7 +1133,7 @@ impl Session {
     pub async fn get_message(&self, id: &str) -> Result<Message> {
         let route = routes::message(&self.inner.workspace_id, &self.inner.id, id)?;
         let resp: MessageResponse = self.inner.http.get(&route, &[]).await?;
-        Ok(Message::from_raw(self.inner.workspace_id.clone(), resp))
+        Ok(Message::from_raw(resp))
     }
 
     /// Update a message's metadata.
@@ -1105,7 +1157,7 @@ impl Session {
         let route = routes::message(&self.inner.workspace_id, &self.inner.id, id)?;
         let body = crate::types::message::MessageMetadataSet { metadata };
         let resp: MessageResponse = self.inner.http.put(&route, Some(&body), &[]).await?;
-        Ok(Message::from_raw(self.inner.workspace_id.clone(), resp))
+        Ok(Message::from_raw(resp))
     }
 
     // ── F6.6: Context ───────────────────────────────────────────────────
@@ -1144,11 +1196,13 @@ impl Session {
         &self,
         options: &crate::types::session::SessionContextOptions,
     ) -> Result<crate::types::session::SessionContext> {
-        options.validate()?;
-        let route = routes::session_context(&self.inner.workspace_id, &self.inner.id)?;
-        let params = options.to_query_params();
-        let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        self.inner.http.get(&route, &refs).await
+        fetch_session_context(
+            &self.inner.http,
+            &self.inner.workspace_id,
+            &self.inner.id,
+            options,
+        )
+        .await
     }
 
     /// Get a context builder for fine-grained control over session context parameters.
@@ -1170,7 +1224,7 @@ impl Session {
     pub fn context_builder(&self) -> SessionContextBuilder {
         SessionContextBuilder {
             http: self.inner.http.clone(),
-            workspace_id: self.inner.workspace_id.clone(),
+            workspace_id: self.inner.workspace_id.to_string(),
             session_id: self.inner.id.clone(),
             summary: true,
             limit_to_session: false,
@@ -1260,10 +1314,7 @@ impl Session {
         let route = routes::session_search(&self.inner.workspace_id, &self.inner.id)?;
         let responses: Vec<MessageResponse> =
             self.inner.http.post(&route, Some(&options), &[]).await?;
-        Ok(responses
-            .into_iter()
-            .map(|r| Message::from_raw(self.inner.workspace_id.clone(), r))
-            .collect())
+        Ok(responses.into_iter().map(Message::from_raw).collect())
     }
 
     /// Get a peer's representation scoped to this session.
@@ -1298,14 +1349,13 @@ impl Session {
     /// # Ok(())
     /// # }
     /// ```
-    #[must_use]
     pub fn representation_builder(
         &self,
         peer_id: impl Into<String>,
     ) -> SessionRepresentationBuilder {
         SessionRepresentationBuilder {
             http: self.inner.http.clone(),
-            workspace_id: self.inner.workspace_id.clone(),
+            workspace_id: self.inner.workspace_id.to_string(),
             session_id: self.inner.id.clone(),
             peer_id: peer_id.into(),
             target: None,
@@ -1346,6 +1396,7 @@ impl Session {
 }
 
 /// Builder for fine-grained representation requests scoped to a session.
+#[must_use]
 pub struct SessionRepresentationBuilder {
     http: HttpClient,
     workspace_id: String,
@@ -1369,7 +1420,6 @@ impl SessionRepresentationBuilder {
     /// let _builder = session.representation_builder("alice").target("bob");
     /// # }
     /// ```
-    #[must_use]
     pub fn target(mut self, val: impl Into<String>) -> Self {
         self.target = Some(val.into());
         self
@@ -1384,7 +1434,6 @@ impl SessionRepresentationBuilder {
     /// let _builder = session.representation_builder("alice").search_query("hobbies");
     /// # }
     /// ```
-    #[must_use]
     pub fn search_query(mut self, val: impl Into<String>) -> Self {
         self.search_query = Some(val.into());
         self
@@ -1399,7 +1448,6 @@ impl SessionRepresentationBuilder {
     /// let _builder = session.representation_builder("alice").search_top_k(20);
     /// # }
     /// ```
-    #[must_use]
     pub fn search_top_k(mut self, val: u32) -> Self {
         self.search_top_k = Some(val);
         self
@@ -1414,7 +1462,6 @@ impl SessionRepresentationBuilder {
     /// let _builder = session.representation_builder("alice").search_max_distance(0.5);
     /// # }
     /// ```
-    #[must_use]
     pub fn search_max_distance(mut self, val: f64) -> Self {
         self.search_max_distance = Some(val);
         self
@@ -1429,7 +1476,6 @@ impl SessionRepresentationBuilder {
     /// let _builder = session.representation_builder("alice").include_most_frequent(true);
     /// # }
     /// ```
-    #[must_use]
     pub fn include_most_frequent(mut self, val: bool) -> Self {
         self.include_most_frequent = Some(val);
         self
@@ -1444,7 +1490,6 @@ impl SessionRepresentationBuilder {
     /// let _builder = session.representation_builder("alice").max_conclusions(25);
     /// # }
     /// ```
-    #[must_use]
     pub fn max_conclusions(mut self, val: u32) -> Self {
         self.max_conclusions = Some(val);
         self
@@ -1611,43 +1656,63 @@ impl SessionContextBuilder {
             include_most_frequent: self.include_most_frequent,
             max_conclusions: self.max_conclusions,
         };
-        options.validate()?;
-
-        let route = routes::session_context(&self.workspace_id, &self.session_id)?;
-        let params = options.to_query_params();
-        let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        self.http.get(&route, &refs).await
+        fetch_session_context(&self.http, &self.workspace_id, &self.session_id, &options).await
     }
+}
+
+/// Validate options, then GET the session context endpoint with the query
+/// parameters they produce. Shared by [`Session::context_with_options`] and
+/// [`SessionContextBuilder::send`] so the route/query/GET logic lives once.
+async fn fetch_session_context(
+    http: &HttpClient,
+    workspace_id: &str,
+    session_id: &str,
+    options: &crate::types::session::SessionContextOptions,
+) -> Result<crate::types::session::SessionContext> {
+    options.validate()?;
+    let route = routes::session_context(workspace_id, session_id)?;
+    let params = options.to_query_params();
+    let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    http.get(&route, &refs).await
 }
 
 fn normalize_peers(
     specs: impl IntoIterator<Item = impl Into<PeerSpec>>,
 ) -> Result<serde_json::Value> {
-    let map: serde_json::Map<String, Value> = specs
-        .into_iter()
-        .map(|s| {
-            let spec = s.into();
-            let val = match &spec {
-                PeerSpec::Id(_) => serde_json::to_value(SessionPeerConfig {
+    use serde_json::map::Entry;
+
+    let mut map = serde_json::Map::new();
+    for s in specs {
+        // Destructure by value so the id is owned (no extra clone) and the config
+        // is taken directly instead of being re-derived per match arm.
+        let (id, cfg) = match s.into() {
+            PeerSpec::Id(id) => (
+                id,
+                SessionPeerConfig {
                     observe_me: None,
                     observe_others: None,
-                })
-                .map_err(|e| {
-                    HonchoError::Configuration(format!(
-                        "failed to serialize peer config for {}: {e}",
-                        spec.id()
-                    ))
-                })?,
-                PeerSpec::WithConfig(_, cfg) => serde_json::to_value(cfg).map_err(|e| {
-                    HonchoError::Configuration(format!(
-                        "failed to serialize peer config for {}: {e}",
-                        spec.id()
-                    ))
-                })?,
-            };
-            Ok((spec.id().to_owned(), val))
-        })
-        .collect::<Result<_>>()?;
+                },
+            ),
+            PeerSpec::WithConfig(id, cfg) => (id, cfg),
+        };
+        let val = serde_json::to_value(&cfg).map_err(|e| {
+            HonchoError::Configuration(format!("failed to serialize peer config for {id}: {e}"))
+        })?;
+        // Reject duplicate IDs instead of letting a later entry silently clobber
+        // an earlier one. The Entry API does a single lookup for both the
+        // duplicate check and the insert.
+        match map.entry(id) {
+            Entry::Occupied(e) => {
+                return Err(HonchoError::Validation(format!(
+                    "duplicate peer id: {}",
+                    e.key()
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(val);
+            }
+        }
+    }
     Ok(Value::Object(map))
 }
 
@@ -1843,6 +1908,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_file_path_without_filename_returns_validation_error() {
+        // Regression: a path with no final file-name component (`/`, trailing
+        // `..`) must fail fast on the PRODUCTION upload path before any request
+        // is made, rather than silently uploading with an empty filename.
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+
+        let err = session
+            .upload_file(FileSource::path("/"))
+            .peer("alice")
+            .send()
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
     async fn upload_file_without_peer_returns_validation_error() {
         let server = MockServer::start().await;
         let http =
@@ -1883,5 +1968,158 @@ mod tests {
             .unwrap();
 
         assert_eq!(msgs.len(), 1);
+    }
+
+    fn peer_json(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "workspace_id": "ws1",
+            "created_at": "2025-01-15T10:30:00Z",
+            "metadata": {},
+            "configuration": {}
+        })
+    }
+
+    #[tokio::test]
+    async fn peers_traverses_all_pages() {
+        use wiremock::matchers::query_param;
+
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+
+        Mock::given(method("GET"))
+            .and(path("/v3/workspaces/ws1/sessions/sess1/peers"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [peer_json("alice")],
+                "total": 2,
+                "page": 1,
+                "size": 1,
+                "pages": 2
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v3/workspaces/ws1/sessions/sess1/peers"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [peer_json("bob")],
+                "total": 2,
+                "page": 2,
+                "size": 1,
+                "pages": 2
+            })))
+            .mount(&server)
+            .await;
+
+        let peers = session.peers().await.unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].id(), "alice");
+        assert_eq!(peers[1].id(), "bob");
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_get_and_updates_all_cache_fields() {
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+        assert!(session.is_active());
+
+        Mock::given(method("GET"))
+            .and(path("/v3/workspaces/ws1/sessions/sess1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sess1",
+                "workspace_id": "ws1",
+                "is_active": false,
+                "metadata": {"topic": "fresh"},
+                "configuration": {},
+                "created_at": "2025-01-15T10:30:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        session.refresh().await.unwrap();
+        assert!(!session.is_active());
+        assert_eq!(session.metadata().unwrap().get("topic").unwrap(), "fresh");
+    }
+
+    #[tokio::test]
+    async fn refresh_on_deleted_session_returns_not_found() {
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+
+        Mock::given(method("GET"))
+            .and(path("/v3/workspaces/ws1/sessions/sess1"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = session.refresh().await.unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[tokio::test]
+    async fn set_metadata_keeps_is_active_fresh() {
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+        assert!(session.is_active());
+
+        // The server flips is_active in its PUT response: the single-lock cache
+        // must refresh is_active too, not just metadata.
+        Mock::given(method("PUT"))
+            .and(path("/v3/workspaces/ws1/sessions/sess1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sess1",
+                "workspace_id": "ws1",
+                "is_active": false,
+                "metadata": {"updated": true},
+                "configuration": {},
+                "created_at": "2025-01-15T10:30:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut meta = HashMap::new();
+        meta.insert("updated".to_owned(), serde_json::json!(true));
+        session.set_metadata(meta).await.unwrap();
+
+        assert!(!session.is_active());
+        assert_eq!(session.metadata().unwrap().get("updated").unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn upload_invalid_content_type_returns_validation_error() {
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+
+        let err = session
+            .upload_file(FileSource::bytes("f.txt", b"data", "text/plain\n"))
+            .peer("alice")
+            .send()
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn add_peers_duplicate_ids_returns_validation_error() {
+        let server = MockServer::start().await;
+        let http =
+            HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
+        let session = make_session(http, "sess1");
+
+        let err = session.add_peers(["alice", "alice"]).await.unwrap_err();
+        assert_eq!(err.code(), "validation_error");
     }
 }

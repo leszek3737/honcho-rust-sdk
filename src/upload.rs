@@ -66,6 +66,12 @@ impl std::fmt::Debug for FileSource {
 impl FileSource {
     /// Create a `Bytes` variant from explicit parts.
     ///
+    /// `data` accepts anything convertible into `Vec<u8>` (e.g. `Vec<u8>`,
+    /// `&[u8]`, `&str`) and is stored as a `Vec<u8>`.
+    ///
+    /// The content type is validated when the upload is sent (during multipart
+    /// form construction), not here, to keep this constructor infallible.
+    ///
     /// The API currently accepts `text/plain`, `application/pdf`, and
     /// `application/json`; other MIME types may be rejected by the server.
     pub fn bytes(
@@ -88,11 +94,10 @@ impl FileSource {
     /// Create a `Stream` variant from an [`AsyncRead`] source.
     ///
     /// The reader is fully consumed with [`tokio::io::AsyncReadExt::read_to_end`]
-    /// and buffered into a `Vec<u8>` before the upload begins. This is **not**
-    /// true streaming — the entire payload resides in memory during the request.
+    /// and buffered into memory before the upload begins. This is **not** true
+    /// streaming — the entire payload resides in memory during the request.
     ///
-    /// For files on disk, prefer [`FileSource::path`] which streams from the
-    /// filesystem without buffering.
+    /// For files on disk, prefer [`FileSource::path`].
     ///
     /// The API currently accepts `text/plain`, `application/pdf`, and
     /// `application/json`; other MIME types may be rejected by the server.
@@ -130,93 +135,15 @@ impl From<&Path> for FileSource {
     }
 }
 
-/// Resolve a [`FileSource`] into `(filename, bytes, content_type)`.
-///
-/// For the `Bytes` variant the fields are returned directly.
-/// For the `Path` variant the file is read, the filename is extracted from
-/// the final path component, and the MIME type is guessed from the extension
-/// (falling back to `application/octet-stream`).
 #[cfg(test)]
-pub(crate) async fn resolve_to_bytes(
-    src: FileSource,
-) -> std::io::Result<(String, Vec<u8>, String)> {
-    match src {
-        FileSource::Bytes {
-            filename,
-            bytes,
-            content_type,
-        } => Ok((filename, bytes, content_type)),
-        FileSource::Path(p) => {
-            let data = tokio::fs::read(&p).await?;
-            let filename = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let content_type = mime_guess::from_path(&p)
-                .first_or_octet_stream()
-                .to_string();
-            Ok((filename, data, content_type))
-        }
-        FileSource::Stream { .. } => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "cannot buffer a stream source — use the streaming upload path",
-        )),
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unnecessary_wraps,
-    clippy::needless_pass_by_value,
-    clippy::unused_async
-)]
 mod tests {
     use static_assertions::assert_impl_all;
 
     use super::*;
-    use std::io::Write;
 
+    // `FileSource` must stay `Send` so uploads can cross `.await` points and be
+    // driven from multi-threaded runtimes. Behavioural coverage of the upload
+    // path lives in `session.rs` tests, which exercise the production
+    // `Session::upload_file(...).send()` flow end-to-end.
     assert_impl_all!(FileSource: Send);
-
-    #[tokio::test]
-    async fn file_source_path_resolves_filename_and_content_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("report.pdf");
-        {
-            let mut f = std::fs::File::create(&file_path).unwrap();
-            f.write_all(b"%PDF-1.4 fake").unwrap();
-        }
-
-        let src = FileSource::path(&file_path);
-        let (name, data, ctype) = resolve_to_bytes(src).await.unwrap();
-
-        assert_eq!(name, "report.pdf");
-        assert_eq!(data, b"%PDF-1.4 fake".as_slice());
-        assert_eq!(ctype, "application/pdf");
-    }
-
-    #[tokio::test]
-    async fn file_source_unknown_extension_falls_back_to_octet_stream() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("data.unknownext");
-        {
-            let mut f = std::fs::File::create(&file_path).unwrap();
-            f.write_all(b"hello").unwrap();
-        }
-
-        let src = FileSource::path(&file_path);
-        let (_, _, ctype) = resolve_to_bytes(src).await.unwrap();
-
-        assert_eq!(ctype, "application/octet-stream");
-    }
-
-    #[tokio::test]
-    async fn file_source_path_nonexistent_returns_io_error() {
-        let src = FileSource::path("/tmp/honcho_test_nonexistent_42deadbeef.pdf");
-        let result = resolve_to_bytes(src).await;
-        assert!(result.is_err());
-    }
 }

@@ -126,8 +126,8 @@ async fn session_refresh_updates_caches() {
         json!({"reasoning": {"enabled": false}}),
     );
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces/ws1/sessions"))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&updated))
         .mount(&server)
         .await;
@@ -149,8 +149,8 @@ async fn session_get_metadata_returns_from_cache() {
 
     let updated = session_response_with(json!({"k": "v"}), json!({}));
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces/ws1/sessions"))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&updated))
         .mount(&server)
         .await;
@@ -189,8 +189,8 @@ async fn session_get_configuration_returns_from_cache() {
 
     let updated = session_response_with(json!({}), json!({"summary": {"enabled": true}}));
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces/ws1/sessions"))
+    Mock::given(method("GET"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&updated))
         .mount(&server)
         .await;
