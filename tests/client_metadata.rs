@@ -34,6 +34,14 @@ async fn gets_workspace_metadata_by_get() {
     let metadata = json!({"env": "production", "team": "core"});
     let response = workspace_response(metadata, json!({}));
 
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
+
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
@@ -52,6 +60,14 @@ async fn get_metadata_empty_when_no_metadata() {
     let server = MockServer::start().await;
 
     let response = workspace_response(json!({}), json!({}));
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
 
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/test-ws"))
@@ -116,6 +132,14 @@ async fn gets_workspace_configuration_by_get() {
     let config = json!({"reasoning": {"enabled": true}});
     let response = workspace_response(json!({}), config);
 
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
+
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/test-ws"))
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
@@ -133,6 +157,14 @@ async fn get_configuration_empty_when_no_configuration() {
     let server = MockServer::start().await;
 
     let response = workspace_response(json!({}), json!({}));
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
 
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/test-ws"))
@@ -155,6 +187,14 @@ async fn gets_workspace_configuration_raw_by_get() {
 
     let config = json!({"unknown_future_field": {"enabled": true}});
     let response = workspace_response(json!({}), config);
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
 
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/test-ws"))
@@ -203,6 +243,14 @@ async fn workspace_id_accessor() {
 async fn get_metadata_returns_error_when_get_fails() {
     let server = MockServer::start().await;
 
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
+
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/nonexistent"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
@@ -221,6 +269,14 @@ async fn get_metadata_returns_error_when_get_fails() {
 #[tokio::test]
 async fn get_configuration_returns_error_when_get_fails() {
     let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+        )
+        .mount(&server)
+        .await;
 
     Mock::given(method("GET"))
         .and(path("/v3/workspaces/nonexistent"))

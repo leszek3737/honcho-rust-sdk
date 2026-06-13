@@ -1,7 +1,7 @@
 //! High-level Honcho SDK client.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
@@ -41,9 +41,36 @@ impl Environment {
 
 struct Inner {
     http: HttpClient,
-    workspace_id: String,
+    workspace_id: Arc<str>,
     base_url: Url,
-    ensure_workspace_once: OnceCell<()>,
+    /// Single-flight "workspace exists" cache.
+    ///
+    /// The inner [`OnceCell`] provides single-flight initialization; wrapping it
+    /// in a `Mutex<Arc<…>>` makes the cache *invalidatable* behind a shared
+    /// reference (`&self`): [`Inner::reset_ensure`] swaps in a fresh cell so the
+    /// next [`Honcho::ensure_workspace`] re-issues the request. The `Mutex`
+    /// critical section only ever clones/replaces an `Arc`, so it is never held
+    /// across an `.await`.
+    ensure_workspace_once: Mutex<Arc<OnceCell<()>>>,
+}
+
+impl Inner {
+    /// Snapshot the current ensure cell (cheap `Arc` clone under a short lock).
+    fn ensure_cell(&self) -> Arc<OnceCell<()>> {
+        self.ensure_workspace_once
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Invalidate the ensure cache so the next `ensure_workspace` re-issues
+    /// the create request (e.g. after a server-side delete).
+    fn reset_ensure(&self) {
+        *self
+            .ensure_workspace_once
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(OnceCell::new());
+    }
 }
 
 /// Entry point for the Honcho SDK.
@@ -94,16 +121,22 @@ impl Honcho {
     pub fn new(base_url: &str, workspace_id: &str) -> Result<Self> {
         validate_workspace_id(workspace_id)?;
         let url = normalize_base_url(base_url)?;
+        let api_key = std::env::var("HONCHO_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         let http = HttpClient::from_params_with_base_url(
-            HttpClient::builder().base_url(base_url.to_owned()).build(),
+            HttpClient::builder()
+                .base_url(base_url.to_owned())
+                .maybe_api_key(api_key)
+                .build(),
             url.clone(),
         )?;
         Ok(Self {
             inner: Arc::new(Inner {
                 http,
-                workspace_id: workspace_id.to_string(),
+                workspace_id: Arc::from(workspace_id),
                 base_url: url,
-                ensure_workspace_once: OnceCell::new(),
+                ensure_workspace_once: Mutex::new(Arc::new(OnceCell::new())),
             }),
         })
     }
@@ -138,17 +171,27 @@ impl Honcho {
     pub fn from_params(params: HonchoParams) -> Result<Self> {
         let resolved_base_url = params
             .base_url
-            .or_else(|| std::env::var("HONCHO_URL").ok())
-            .or_else(|| std::env::var("HONCHO_API_URL").ok())
+            .or_else(|| std::env::var("HONCHO_URL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                std::env::var("HONCHO_API_URL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| params.environment.base_url().to_owned());
 
-        let resolved_api_key = params
-            .api_key
-            .or_else(|| std::env::var("HONCHO_API_KEY").ok());
+        let resolved_api_key = params.api_key.or_else(|| {
+            std::env::var("HONCHO_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
 
         let resolved_workspace_id = params
             .workspace_id
-            .or_else(|| std::env::var("HONCHO_WORKSPACE_ID").ok())
+            .or_else(|| {
+                std::env::var("HONCHO_WORKSPACE_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "default".to_owned());
 
         validate_workspace_id(&resolved_workspace_id)?;
@@ -170,36 +213,35 @@ impl Honcho {
         Ok(Self {
             inner: Arc::new(Inner {
                 http,
-                workspace_id: resolved_workspace_id,
+                workspace_id: Arc::from(resolved_workspace_id),
                 base_url,
-                ensure_workspace_once: OnceCell::new(),
+                ensure_workspace_once: Mutex::new(Arc::new(OnceCell::new())),
             }),
         })
     }
 
     /// Ensure the workspace exists on the server (`POST /v3/workspaces`).
     pub(crate) async fn ensure_workspace(&self) -> Result<()> {
-        self.inner
-            .ensure_workspace_once
-            .get_or_try_init(|| async {
-                let body = crate::types::workspace::WorkspaceCreate {
-                    id: self.inner.workspace_id.clone(),
-                    metadata: None,
-                    configuration: None,
-                };
-                match self
-                    .inner
-                    .http
-                    .post::<_, Workspace>(&routes::workspaces(), Some(&body), &[])
-                    .await
-                {
-                    Ok(_) => Ok(()),
-                    Err(e) if e.status_code() == Some(409) => Ok(()),
-                    Err(e) => Err(e),
-                }
-            })
-            .await
-            .map(drop)
+        let cell = self.inner.ensure_cell();
+        cell.get_or_try_init(|| async {
+            let body = crate::types::workspace::WorkspaceCreate {
+                id: self.inner.workspace_id.to_string(),
+                metadata: None,
+                configuration: None,
+            };
+            match self
+                .inner
+                .http
+                .post::<_, Workspace>(&routes::workspaces(), Some(&body), &[])
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(e) if e.status_code() == Some(409) => Ok(()),
+                Err(e) => Err(e),
+            }
+        })
+        .await
+        .map(drop)
     }
 
     /// Eagerly ensure the workspace exists.
@@ -214,6 +256,10 @@ impl Honcho {
     /// # }
     /// ```
     pub async fn force_ensure(&self) -> Result<()> {
+        // Bypass the cached `OnceCell`: invalidate it first so this call always
+        // re-issues the ensure request, even when a prior lazy ensure already
+        // succeeded or the workspace was deleted server-side.
+        self.inner.reset_ensure();
         self.ensure_workspace().await
     }
 
@@ -244,6 +290,7 @@ impl Honcho {
 
     /// Fetch workspace metadata from the server.
     pub async fn get_metadata(&self) -> Result<HashMap<String, Value>> {
+        self.ensure_workspace().await?;
         let ws: Workspace = self
             .inner
             .http
@@ -274,6 +321,7 @@ impl Honcho {
     /// }
     /// ```
     pub async fn get_configuration(&self) -> Result<WorkspaceConfiguration> {
+        self.ensure_workspace().await?;
         let ws: Workspace = self
             .inner
             .http
@@ -312,15 +360,21 @@ impl Honcho {
     /// Use this when the server returns fields not yet represented in
     /// [`WorkspaceConfiguration`].
     pub async fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
+        self.ensure_workspace().await?;
         let raw: serde_json::Value = self
             .inner
             .http
             .get(&routes::workspace(&self.inner.workspace_id)?, &[])
             .await?;
-        match raw.get("configuration") {
-            Some(serde_json::Value::Object(map)) => {
-                Ok(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            }
+        // Take ownership of the parsed JSON and move the `configuration` object
+        // out of it — no per-entry cloning.
+        match raw {
+            serde_json::Value::Object(mut map) => match map.remove("configuration") {
+                Some(serde_json::Value::Object(configuration)) => {
+                    Ok(configuration.into_iter().collect())
+                }
+                _ => Ok(HashMap::new()),
+            },
             _ => Ok(HashMap::new()),
         }
     }
@@ -454,6 +508,7 @@ impl Honcho {
     /// # }
     /// ```
     pub async fn refresh(&self) -> Result<()> {
+        self.ensure_workspace().await?;
         let _: Workspace = self
             .inner
             .http
@@ -494,9 +549,14 @@ impl Honcho {
                 &[],
             )
             .await?;
+        // NOTE: `Message::from_raw` owns a `String` workspace_id, so each
+        // message still allocates one. Removing the per-message allocation would
+        // require changing `from_raw` to accept `Arc<str>` (out of scope here —
+        // owned by message.rs). The internal `Arc<str>` field at least avoids a
+        // standing `String` clone on the client itself.
         Ok(responses
             .into_iter()
-            .map(|r| crate::Message::from_raw(self.inner.workspace_id.clone(), r))
+            .map(|r| crate::Message::from_raw(self.workspace_id().to_owned(), r))
             .collect())
     }
 
@@ -589,10 +649,38 @@ impl Honcho {
     /// # }
     /// ```
     pub async fn delete_workspace(&self, id: &str) -> Result<()> {
-        self.inner.http.delete(&routes::workspace(id)?, &[]).await
+        self.inner
+            .http
+            .delete::<()>(&routes::workspace(id)?, &[])
+            .await?;
+        // If we just deleted the workspace this client is scoped to, invalidate
+        // the ensure cache so later peer()/session() calls re-create it instead
+        // of failing with 404 against a now-missing workspace.
+        if id == self.workspace_id() {
+            self.inner.reset_ensure();
+        }
+        Ok(())
     }
 
     // ── Paginated list methods (F4.5) ──────────────────────────────────
+
+    /// Shared pagination plumbing for the peer/session list endpoints:
+    /// ensure the workspace exists, then POST to `route` for one page.
+    async fn list<T>(
+        &self,
+        route: &str,
+        body: Option<&Value>,
+        page: u64,
+        size: u64,
+        reverse: bool,
+    ) -> Result<crate::types::pagination::Page<T>>
+    where
+        T: serde::de::DeserializeOwned + Clone + Send + 'static,
+    {
+        self.ensure_workspace().await?;
+        crate::types::pagination::paginate_post(&self.inner.http, route, body, page, size, reverse)
+            .await
+    }
 
     /// List peers in the workspace. Returns a paginated result.
     ///
@@ -611,9 +699,7 @@ impl Honcho {
     /// # }
     /// ```
     pub async fn peers(&self) -> Result<crate::types::pagination::Page<crate::types::peer::Peer>> {
-        self.ensure_workspace().await?;
-        crate::types::pagination::paginate_post(
-            &self.inner.http,
+        self.list(
             &routes::peers_list(&self.inner.workspace_id)?,
             None,
             1,
@@ -645,14 +731,12 @@ impl Honcho {
         size: u64,
         reverse: bool,
     ) -> Result<crate::types::pagination::Page<crate::types::peer::Peer>> {
-        self.ensure_workspace().await?;
         let body = crate::types::peer::PeerGet {
             filters: Some(filters),
         };
         let body_val =
             serde_json::to_value(&body).map_err(|e| HonchoError::Configuration(e.to_string()))?;
-        crate::types::pagination::paginate_post(
-            &self.inner.http,
+        self.list(
             &routes::peers_list(&self.inner.workspace_id)?,
             Some(&body_val),
             page,
@@ -681,9 +765,7 @@ impl Honcho {
     pub async fn sessions(
         &self,
     ) -> Result<crate::types::pagination::Page<crate::types::session::Session>> {
-        self.ensure_workspace().await?;
-        crate::types::pagination::paginate_post(
-            &self.inner.http,
+        self.list(
             &routes::sessions_list(&self.inner.workspace_id)?,
             None,
             1,
@@ -715,14 +797,12 @@ impl Honcho {
         size: u64,
         reverse: bool,
     ) -> Result<crate::types::pagination::Page<crate::types::session::Session>> {
-        self.ensure_workspace().await?;
         let body = crate::types::session::SessionGet {
             filters: Some(filters),
         };
         let body_val =
             serde_json::to_value(&body).map_err(|e| HonchoError::Configuration(e.to_string()))?;
-        crate::types::pagination::paginate_post(
-            &self.inner.http,
+        self.list(
             &routes::sessions_list(&self.inner.workspace_id)?,
             Some(&body_val),
             page,
@@ -786,4 +866,217 @@ fn validate_workspace_id(workspace_id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn workspace_body() -> serde_json::Value {
+        serde_json::json!({ "id": "ws-1", "created_at": "2025-01-15T10:30:00Z" })
+    }
+
+    fn peer_body() -> serde_json::Value {
+        serde_json::json!({
+            "id": "p1",
+            "workspace_id": "ws-1",
+            "created_at": "2025-01-15T10:30:00Z",
+        })
+    }
+
+    /// Build a wiremock-targeting client with `HONCHO_API_KEY` pinned unset.
+    ///
+    /// `Honcho::new` reads `HONCHO_API_KEY` from the process environment at
+    /// construction time. These wiremock tests do not expect an auth header, so
+    /// ambient env — or a concurrent env-mutating test (e.g.
+    /// `new_picks_up_honcho_api_key_env`) — could otherwise leak a `Bearer`
+    /// token into them. Pinning the var via `temp_env` makes construction
+    /// deterministic regardless of ambient state, and `temp_env`'s internal lock
+    /// serializes this read against the module's other env scopes without
+    /// forcing the whole (async) test body to run serially.
+    fn client_no_env_key(base_url: &str) -> Honcho {
+        temp_env::with_var("HONCHO_API_KEY", None::<&str>, || {
+            Honcho::new(base_url, "ws-1").unwrap()
+        })
+    }
+
+    /// Count requests that hit the workspace-ensure endpoint (`POST /v3/workspaces`).
+    async fn ensure_hits(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/v3/workspaces")
+            .count()
+    }
+
+    // Bug 1: `force_ensure` must bypass the cached OnceCell and re-issue the
+    // ensure request every call, even after a prior success.
+    #[tokio::test]
+    async fn force_ensure_reissues_every_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
+            .mount(&server)
+            .await;
+
+        let client = client_no_env_key(&server.uri());
+        client.force_ensure().await.unwrap();
+        client.force_ensure().await.unwrap();
+
+        let hits = ensure_hits(&server).await;
+        assert!(
+            hits >= 2,
+            "force_ensure should re-issue PUT/POST, got {hits}"
+        );
+    }
+
+    // Bug 2: `new` must honor `HONCHO_API_KEY` and send it as a bearer token.
+    // The mock only matches when the Authorization header is present, so a
+    // missing key would yield zero received requests.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn new_picks_up_honcho_api_key_env() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces"))
+            .and(header("authorization", "Bearer secret-key-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        // `new` reads the env synchronously at construction time; build the
+        // client inside the scoped env so the key is baked into the HttpClient.
+        let client = temp_env::with_var("HONCHO_API_KEY", Some("secret-key-123"), || {
+            Honcho::new(&uri, "ws-1").unwrap()
+        });
+
+        client.force_ensure().await.unwrap();
+        assert_eq!(ensure_hits(&server).await, 1, "auth header was not sent");
+    }
+
+    // Bug 3: deleting the client's own workspace must invalidate the ensure
+    // cache so a subsequent peer()/session() re-creates it (POST #2) instead of
+    // short-circuiting and 404-ing.
+    #[tokio::test]
+    async fn delete_self_workspace_resets_ensure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v3/workspaces/ws-1"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws-1/peers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(peer_body()))
+            .mount(&server)
+            .await;
+
+        let client = client_no_env_key(&server.uri());
+        client.peer("alice", None, None).await.unwrap(); // ensure POST #1
+        client.delete_workspace("ws-1").await.unwrap(); // resets cache
+        client.peer("bob", None, None).await.unwrap(); // ensure POST #2
+
+        let hits = ensure_hits(&server).await;
+        assert!(
+            hits >= 2,
+            "deleting own workspace must force re-ensure, got {hits}"
+        );
+    }
+
+    // Deleting a *different* workspace must NOT invalidate our ensure cache.
+    #[tokio::test]
+    async fn delete_other_workspace_keeps_ensure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v3/workspaces/other-ws"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws-1/peers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(peer_body()))
+            .mount(&server)
+            .await;
+
+        let client = client_no_env_key(&server.uri());
+        client.peer("alice", None, None).await.unwrap(); // ensure POST #1
+        client.delete_workspace("other-ws").await.unwrap(); // unrelated, no reset
+        client.peer("bob", None, None).await.unwrap(); // cache hit, no POST #2
+
+        assert_eq!(
+            ensure_hits(&server).await,
+            1,
+            "deleting an unrelated workspace must not reset the cache"
+        );
+    }
+
+    // Bug 4: an empty `HONCHO_URL` must fall through to the next source
+    // (here: the default environment URL), not be used as the base URL.
+    #[test]
+    #[serial_test::serial]
+    fn empty_honcho_url_falls_back_to_default() {
+        let client = temp_env::with_vars(
+            [
+                ("HONCHO_URL", Some("")),
+                ("HONCHO_API_URL", None),
+                ("HONCHO_WORKSPACE_ID", None),
+                ("HONCHO_API_KEY", None),
+            ],
+            || Honcho::from_params(Honcho::builder().build()).unwrap(),
+        );
+
+        assert!(
+            client
+                .base_url()
+                .as_str()
+                .starts_with("https://api.honcho.dev"),
+            "empty HONCHO_URL should fall back to the default, got {}",
+            client.base_url()
+        );
+    }
+
+    // Task 6: getters that previously skipped `ensure_workspace` now call it,
+    // matching their siblings (peer/session/search). `refresh` should ensure
+    // the workspace (POST) before fetching it (GET).
+    #[tokio::test]
+    async fn refresh_ensures_workspace_first() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/workspaces/ws-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
+            .mount(&server)
+            .await;
+
+        let client = client_no_env_key(&server.uri());
+        client.refresh().await.unwrap();
+
+        assert_eq!(
+            ensure_hits(&server).await,
+            1,
+            "refresh must ensure the workspace before fetching it"
+        );
+    }
 }

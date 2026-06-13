@@ -73,7 +73,10 @@ async fn force_ensure_separate_instances_both_succeed() {
 }
 
 #[tokio::test]
-async fn force_ensure_repeated_on_same_instance_hits_server_once() {
+async fn force_ensure_repeated_on_same_instance_hits_server_every_call() {
+    // force_ensure always bypasses the cache and re-issues POST /v3/workspaces
+    // on every call, so it can recover after a server-side workspace delete.
+    // N calls on the same instance => N POSTs.
     let server = MockServer::start().await;
     let create_body = serde_json::json!({"id": "ws-once"});
 
@@ -81,7 +84,7 @@ async fn force_ensure_repeated_on_same_instance_hits_server_once() {
         .and(path("/v3/workspaces"))
         .and(body_json(&create_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(workspace_json("ws-once")))
-        .expect(1)
+        .expect(5)
         .mount(&server)
         .await;
 
@@ -99,11 +102,13 @@ async fn force_ensure_server_returns_existing_workspace_still_ok() {
     let server = MockServer::start().await;
     let create_body = serde_json::json!({"id": "ws-exist"});
 
+    // Each force_ensure re-issues the POST; the server returning an existing
+    // workspace via 200 is still Ok. Two calls => two POSTs.
     Mock::given(method("POST"))
         .and(path("/v3/workspaces"))
         .and(body_json(&create_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(workspace_json("ws-exist")))
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -117,7 +122,9 @@ async fn force_ensure_server_returns_existing_workspace_still_ok() {
 
 #[cfg(feature = "blocking")]
 #[test]
-fn blocking_force_ensure_idempotent() {
+fn blocking_force_ensure_reissues_every_call() {
+    // Blocking force_ensure mirrors the async contract: every call bypasses the
+    // cache and re-issues POST /v3/workspaces. Two calls => two POSTs.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -130,7 +137,7 @@ fn blocking_force_ensure_idempotent() {
             .and(path("/v3/workspaces"))
             .and(body_json(&create_body))
             .respond_with(ResponseTemplate::new(200).set_body_json(workspace_json("ws-blk")))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
     });

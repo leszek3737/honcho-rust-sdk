@@ -11,14 +11,13 @@ use crate::http::client::HttpClient;
 use crate::http::routes;
 use crate::types::conclusion::Conclusion as ConclusionData;
 use crate::types::conclusion::ConclusionPage;
-use crate::types::conclusion::{ConclusionBatchCreate, ConclusionCreate};
 use crate::types::conclusion::{ConclusionFilters, ConclusionGet, ConclusionQuery};
 use crate::types::dialectic::RepresentationResponse;
 use crate::types::pagination::paginate_post;
 use crate::types::session::validate_search_params;
 
 pub(crate) struct ConclusionInner {
-    workspace_id: String,
+    workspace_id: Arc<str>,
     id: String,
     content: String,
     observer_id: String,
@@ -37,10 +36,10 @@ pub struct Conclusion {
 
 impl Conclusion {
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn from_parts(workspace_id: String, resp: ConclusionData) -> Self {
+    pub(crate) fn from_parts(workspace_id: impl Into<Arc<str>>, resp: ConclusionData) -> Self {
         Self {
             inner: Arc::new(ConclusionInner {
-                workspace_id,
+                workspace_id: workspace_id.into(),
                 id: resp.id,
                 content: resp.content,
                 observer_id: resp.observer_id,
@@ -154,21 +153,19 @@ impl Conclusion {
 
 impl fmt::Debug for Conclusion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let truncated = if self.inner.content.len() > 50 {
-            let end = self
-                .inner
-                .content
-                .char_indices()
-                .nth(50)
-                .map_or(self.inner.content.len(), |(i, _)| i);
-            &self.inner.content[..end]
-        } else {
-            &self.inner.content
+        /// Maximum number of characters of `content` shown in debug output.
+        const MAX_CHARS: usize = 50;
+        let content = self.inner.content.as_str();
+        // Char-based truncation (not byte-based) so multibyte UTF-8 is never
+        // split; append an ellipsis marker when content is elided.
+        let truncated: std::borrow::Cow<'_, str> = match content.char_indices().nth(MAX_CHARS) {
+            Some((byte_idx, _)) => std::borrow::Cow::Owned(format!("{}…", &content[..byte_idx])),
+            None => std::borrow::Cow::Borrowed(content),
         };
         f.debug_struct("Conclusion")
             .field("id", &self.inner.id)
             .field("content", &truncated)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -212,12 +209,63 @@ impl ConclusionCreateParams {
     }
 }
 
+/// Owned per-item create payload.
+///
+/// Holds only the fields that vary per item; `observer_id` / `observed_id`
+/// come from the scope and are injected by reference at serialization time
+/// (see [`CreateRef`]), so the scope IDs are never cloned per item.
+struct ConclusionItem {
+    content: String,
+    session_id: Option<String>,
+}
+
+/// Borrowing view of a single conclusion create body.
+///
+/// Serializes identically to `ConclusionCreate` but borrows every field, so
+/// no per-item `String` is cloned.
+#[derive(Serialize)]
+struct CreateRef<'a> {
+    content: &'a str,
+    observer_id: &'a str,
+    observed_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+}
+
+/// Borrowing view of a batch create body.
+///
+/// Serializes identically to `ConclusionBatchCreate`; built per chunk by
+/// slicing the owned items rather than copying them (no `Vec::to_vec`).
+#[derive(Serialize)]
+struct BatchRef<'a> {
+    conclusions: Vec<CreateRef<'a>>,
+}
+
+/// Build a borrowing batch body for one chunk of items.
+// `observer`/`observed` are the domain field names; the similarity is inherent.
+#[allow(clippy::similar_names)]
+fn batch_ref<'a>(
+    chunk: &'a [ConclusionItem],
+    observer_id: &'a str,
+    observed_id: &'a str,
+) -> BatchRef<'a> {
+    BatchRef {
+        conclusions: chunk
+            .iter()
+            .map(|it| CreateRef {
+                content: &it.content,
+                observer_id,
+                observed_id,
+                session_id: it.session_id.as_deref(),
+            })
+            .collect(),
+    }
+}
+
 pub(crate) struct ConclusionScopeInner {
     http: HttpClient,
-    workspace_id: String,
-    #[allow(clippy::similar_names)]
+    workspace_id: Arc<str>,
     observer: String,
-    #[allow(clippy::similar_names)]
     observed: String,
 }
 
@@ -241,7 +289,7 @@ impl ConclusionScope {
         Self {
             inner: Arc::new(ConclusionScopeInner {
                 http,
-                workspace_id,
+                workspace_id: workspace_id.into(),
                 observer: observer_id,
                 observed: observed_id,
             }),
@@ -297,40 +345,55 @@ impl ConclusionScope {
     /// # Errors
     ///
     /// Returns [`HonchoError::Server`] if the server rejects any batch.
+    ///
+    /// # Partial failure (inputs > 100)
+    ///
+    /// When more than 100 conclusions are supplied they are split into batches
+    /// of 100 and sent **sequentially and non-atomically**. If a later batch
+    /// fails, the conclusions from earlier batches have *already been created
+    /// server-side* and are **not** rolled back — but their returned IDs are
+    /// dropped and this method returns only the error, so the partial success
+    /// is not reported to the caller. Callers needing all-or-nothing or
+    /// exactly-once semantics for large inputs should chunk the input
+    /// themselves (≤ 100 per call) and track which calls succeeded.
+    ///
+    /// A typed partial-result that carries the already-created conclusions
+    /// alongside the error is planned for a future release.
+    #[allow(clippy::similar_names)]
     pub async fn create(
         &self,
         conclusions: impl IntoIterator<Item = impl Into<ConclusionCreateParams>>,
     ) -> Result<Vec<Conclusion>> {
-        let creates: Vec<ConclusionCreate> = conclusions
+        let items: Vec<ConclusionItem> = conclusions
             .into_iter()
             .map(|c| {
                 let p: ConclusionCreateParams = c.into();
-                ConclusionCreate {
+                ConclusionItem {
                     content: p.content,
-                    observer_id: self.inner.observer.clone(),
-                    observed_id: self.inner.observed.clone(),
                     session_id: p.session_id,
                 }
             })
             .collect();
 
-        if creates.is_empty() {
+        if items.is_empty() {
             return Ok(Vec::new());
         }
 
         let route = routes::conclusions(&self.inner.workspace_id)?;
+        let observer = self.inner.observer.as_str();
+        let observed = self.inner.observed.as_str();
 
-        let all_data: Vec<ConclusionData> = if creates.len() <= 100 {
-            let body = ConclusionBatchCreate {
-                conclusions: creates,
-            };
+        let all_data: Vec<ConclusionData> = if items.len() <= 100 {
+            let body = batch_ref(&items, observer, observed);
             self.inner.http.post(&route, Some(&body), &[]).await?
         } else {
-            let mut all = Vec::with_capacity(creates.len());
-            for chunk in creates.chunks(100) {
-                let body = ConclusionBatchCreate {
-                    conclusions: chunk.to_vec(),
-                };
+            // NOTE: batches are sent sequentially and are NOT atomic — see the
+            // partial-failure hazard documented on this method. On `?` here the
+            // already-created earlier chunks are accumulated in `all` but cannot
+            // be surfaced through the current return type, so they are dropped.
+            let mut all = Vec::with_capacity(items.len());
+            for chunk in items.chunks(100) {
+                let body = batch_ref(chunk, observer, observed);
                 let batch: Vec<ConclusionData> =
                     self.inner.http.post(&route, Some(&body), &[]).await?;
                 all.extend(batch);
@@ -401,6 +464,7 @@ impl ConclusionScope {
     /// # Errors
     ///
     /// Returns [`HonchoError::Server`] if the server rejects the request.
+    #[must_use]
     pub fn list(&self) -> ListConclusionsBuilder {
         ListConclusionsBuilder {
             scope: self.clone(),
@@ -433,6 +497,7 @@ impl ConclusionScope {
     /// Returns [`HonchoError::Validation`] if `query` is empty, `top_k` ∉ [1, 100],
     /// or `distance` ∉ [0.0, 1.0]. Returns [`HonchoError::Server`] on
     /// transport or API errors.
+    #[must_use]
     pub fn query(&self, query: impl Into<String>) -> QueryConclusionsBuilder {
         QueryConclusionsBuilder {
             scope: self.clone(),
@@ -468,7 +533,7 @@ impl ConclusionScope {
 /// Obtained via [`ConclusionScope::representation()`].
 pub struct ConclusionRepresentationBuilder {
     http: HttpClient,
-    workspace_id: String,
+    workspace_id: Arc<str>,
     observer_id: String,
     observed_id: String,
     search_query: Option<String>,
@@ -597,7 +662,6 @@ impl ConclusionRepresentationBuilder {
 }
 
 /// Builder for paginated conclusion listing, obtained via [`ConclusionScope::list()`].
-#[must_use]
 pub struct ListConclusionsBuilder {
     scope: ConclusionScope,
     page: u64,
@@ -616,6 +680,7 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().page(2);
     /// # }
     /// ```
+    #[must_use]
     pub fn page(mut self, page: u32) -> Self {
         self.page = u64::from(page);
         self
@@ -630,6 +695,7 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().size(25);
     /// # }
     /// ```
+    #[must_use]
     pub fn size(mut self, size: u32) -> Self {
         self.size = u64::from(size);
         self
@@ -644,6 +710,7 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().session("sess-42");
     /// # }
     /// ```
+    #[must_use]
     pub fn session(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
@@ -658,6 +725,7 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().reverse(true);
     /// # }
     /// ```
+    #[must_use]
     pub fn reverse(mut self, reverse: bool) -> Self {
         self.reverse = reverse;
         self
@@ -702,7 +770,6 @@ impl ListConclusionsBuilder {
 }
 
 /// Builder for semantic conclusion queries, obtained via [`ConclusionScope::query()`].
-#[must_use]
 pub struct QueryConclusionsBuilder {
     scope: ConclusionScope,
     query: String,
@@ -720,6 +787,7 @@ impl QueryConclusionsBuilder {
     /// let _builder = scope.query("interests").top_k(5);
     /// # }
     /// ```
+    #[must_use]
     pub fn top_k(mut self, top_k: u32) -> Self {
         self.top_k = top_k;
         self
@@ -734,6 +802,7 @@ impl QueryConclusionsBuilder {
     /// let _builder = scope.query("interests").distance(0.7);
     /// # }
     /// ```
+    #[must_use]
     pub fn distance(mut self, distance: f64) -> Self {
         self.distance = Some(distance);
         self
@@ -758,14 +827,20 @@ impl QueryConclusionsBuilder {
     /// Returns [`HonchoError::Validation`] if `query` is empty, `top_k` ∉ [1, 100],
     /// or `distance` ∉ [0.0, 1.0].
     pub async fn send(self) -> Result<Vec<Conclusion>> {
-        if self.query.is_empty() {
+        if self.query.trim().is_empty() {
             return Err(HonchoError::Validation(
                 "query must not be empty".to_string(),
             ));
         }
         validate_search_params(Some(self.top_k), self.distance, None).map_err(|e| {
             if let HonchoError::Validation(msg) = &e {
-                HonchoError::Validation(msg.replace("search_max_distance", "distance"))
+                // Remap the internal representation-param names to this builder's
+                // public method names so error messages reference `top_k` /
+                // `distance`, not `search_top_k` / `search_max_distance`.
+                HonchoError::Validation(
+                    msg.replace("search_max_distance", "distance")
+                        .replace("search_top_k", "top_k"),
+                )
             } else {
                 e
             }
@@ -1458,5 +1533,91 @@ mod tests {
             .await;
 
         scope.delete("c1").await.unwrap();
+    }
+
+    // ── PR4: partial-failure & validation gaps ───────────────────────────
+
+    #[test]
+    fn debug_appends_ellipsis_and_is_non_exhaustive() {
+        let data = make_conclusion_data("b".repeat(80), None);
+        let conc = Conclusion::from_parts("ws".to_owned(), data);
+        let dbg = format!("{conc:?}");
+        assert!(dbg.contains('…'), "expected ellipsis marker: {dbg}");
+        assert!(
+            dbg.contains(".."),
+            "expected finish_non_exhaustive marker: {dbg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_batch_over_100_partial_failure_first_chunk_committed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        let scope = make_scope(&server);
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_resp = calls.clone();
+
+        // First chunk succeeds (committed server-side); every later request
+        // fails. Documents the PR4 hazard: earlier-created conclusions are not
+        // surfaced through the error.
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/conclusions"))
+            .respond_with(move |req: &wiremock::Request| {
+                let n = calls_resp.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                    let count = body["conclusions"].as_array().unwrap().len();
+                    let items: Vec<serde_json::Value> = (0..count)
+                        .map(|i| conclusion_json(&format!("c-{i}"), &format!("id-{i}")))
+                        .collect();
+                    ResponseTemplate::new(200).set_body_json(&items)
+                } else {
+                    ResponseTemplate::new(500).set_body_json(serde_json::json!({"detail": "boom"}))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let params: Vec<ConclusionCreateParams> = (0..150)
+            .map(|i| ConclusionCreateParams::new(format!("c-{i}")))
+            .collect();
+        let err = scope.create(params).await.unwrap_err();
+
+        // The call fails as a whole (no typed partial-result yet — deferred).
+        assert_eq!(err.code(), "server_error");
+        // But the first chunk was already sent and committed server-side before
+        // the failing one — proving the non-atomic, partial-failure hazard.
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "first chunk should have been committed before the failing chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_top_k_error_names_top_k_not_search_top_k() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+
+        let err = scope.query("hobbies").top_k(0).send().await.unwrap_err();
+        let HonchoError::Validation(msg) = err else {
+            panic!("expected validation error");
+        };
+        assert!(msg.contains("top_k"), "message should name top_k: {msg}");
+        assert!(
+            !msg.contains("search_top_k"),
+            "message must not leak the internal param name: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_rejects_whitespace_only() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+
+        let err = scope.query("   \t\n ").send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
     }
 }

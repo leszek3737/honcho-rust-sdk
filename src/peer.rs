@@ -21,14 +21,25 @@ use crate::types::message::{MessageCreate, MessageResponse, MessageSearchOptions
 use crate::types::pagination::{self, Page};
 use crate::types::peer::Peer as PeerResponse;
 use crate::types::peer::{PeerCardResponse, PeerCardSet, PeerConfig, PeerContext};
-use crate::types::session::{Session, SessionListOptions};
+use crate::types::session::{Session, SessionListOptions, validate_search_params};
 
 pub(crate) struct PeerInner {
     http: HttpClient,
     workspace_id: String,
     id: String,
-    metadata: RwLock<Option<HashMap<String, Value>>>,
-    configuration: RwLock<Option<PeerConfig>>,
+    /// Cached peer state guarded by a single lock so metadata and
+    /// configuration are always read and written as one consistent snapshot.
+    cache: RwLock<PeerCacheState>,
+}
+
+/// Cached peer state from the last API response.
+///
+/// Both fields live under one [`RwLock`] so a reader never observes new
+/// metadata paired with a stale configuration (or vice versa).
+#[derive(Default)]
+struct PeerCacheState {
+    metadata: Option<HashMap<String, Value>>,
+    configuration: Option<PeerConfig>,
 }
 
 /// A peer in a Honcho workspace.
@@ -61,14 +72,16 @@ impl Peer {
         workspace_id: String,
         resp: PeerResponse,
     ) -> Result<Self> {
-        let config = map_to_peer_config(&resp.configuration)?;
+        let configuration = map_to_peer_config(&resp.configuration)?;
         Ok(Self {
             inner: Arc::new(PeerInner {
                 http,
                 workspace_id,
                 id: resp.id,
-                metadata: RwLock::new(Some(resp.metadata)),
-                configuration: RwLock::new(config),
+                cache: RwLock::new(PeerCacheState {
+                    metadata: Some(resp.metadata),
+                    configuration: Some(configuration),
+                }),
             }),
         })
     }
@@ -81,7 +94,37 @@ impl Peer {
         )
     }
 
-    // ── F5.1: Construction + Metadata ──────────────────────────────────
+    // ── Construction + Metadata ────────────────────────────────────────
+
+    /// Acquire a read guard over the cached peer state.
+    ///
+    /// Recovers from lock poisoning so a panicking writer never propagates a
+    /// panic into otherwise-infallible accessors.
+    fn read_cache(&self) -> std::sync::RwLockReadGuard<'_, PeerCacheState> {
+        self.inner
+            .cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Atomically update the cached metadata and/or configuration.
+    ///
+    /// A single lock acquisition swaps both fields, so concurrent readers
+    /// always see a consistent snapshot. `None` arguments leave the
+    /// corresponding field untouched.
+    fn store(&self, metadata: Option<HashMap<String, Value>>, configuration: Option<PeerConfig>) {
+        let mut cache = self
+            .inner
+            .cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(metadata) = metadata {
+            cache.metadata = Some(metadata);
+        }
+        if let Some(configuration) = configuration {
+            cache.configuration = Some(configuration);
+        }
+    }
 
     /// The peer's unique identifier.
     ///
@@ -110,11 +153,7 @@ impl Peer {
     /// ```
     #[must_use]
     pub fn metadata(&self) -> Option<HashMap<String, Value>> {
-        self.inner
-            .metadata
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.read_cache().metadata.clone()
     }
 
     /// Cached configuration from the last API response.
@@ -130,11 +169,7 @@ impl Peer {
     /// ```
     #[must_use]
     pub fn configuration(&self) -> Option<PeerConfig> {
-        self.inner
-            .configuration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.read_cache().configuration.clone()
     }
 
     /// Refresh the peer's cached metadata and configuration from the server.
@@ -184,6 +219,14 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, metadata), fields(peer_id = self.inner.id.as_str())))]
     pub async fn set_metadata(&self, metadata: HashMap<String, Value>) -> Result<()> {
+        self.put_metadata(metadata).await
+    }
+
+    /// Replace the peer's metadata on the server (full `PUT`) and refresh the
+    /// cached metadata from the response.
+    ///
+    /// Shared implementation behind [`Self::set_metadata`] and [`Self::update`].
+    async fn put_metadata(&self, metadata: HashMap<String, Value>) -> Result<()> {
         let body = crate::types::peer::PeerMetadataSet { metadata };
         let resp: PeerResponse = self
             .inner
@@ -194,11 +237,7 @@ impl Peer {
                 &[],
             )
             .await?;
-        *self
-            .inner
-            .metadata
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.metadata);
+        self.store(Some(resp.metadata), None);
         Ok(())
     }
 
@@ -214,8 +253,14 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.inner.id.as_str())))]
     pub async fn get_configuration(&self) -> Result<PeerConfig> {
+        // Derive the return value from the freshly fetched response rather than
+        // re-reading the cache after the store. A concurrent caller can
+        // overwrite the cache between the store and the read, which would make
+        // this method return another caller's configuration (a TOCTOU race).
+        // Parsing the response directly mirrors `get_metadata` and
+        // `get_configuration_raw`, and is identical to what the cache stored.
         let resp = self.fetch_and_update_cache().await?;
-        Ok(map_to_peer_config(&resp.configuration)?.unwrap_or_default())
+        map_to_peer_config(&resp.configuration)
     }
 
     /// Set the peer's configuration on the server and update the cache.
@@ -245,12 +290,7 @@ impl Peer {
                 &[],
             )
             .await?;
-        *self
-            .inner
-            .configuration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            map_to_peer_config(&resp.configuration)?;
+        self.store(None, Some(map_to_peer_config(&resp.configuration)?));
         Ok(())
     }
 
@@ -278,17 +318,8 @@ impl Peer {
             .http
             .post(&routes::peers(&self.inner.workspace_id)?, Some(&body), &[])
             .await?;
-        *self
-            .inner
-            .metadata
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.metadata.clone());
-        *self
-            .inner
-            .configuration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            map_to_peer_config(&resp.configuration)?;
+        let configuration = map_to_peer_config(&resp.configuration)?;
+        self.store(Some(resp.metadata.clone()), Some(configuration));
         Ok(resp)
     }
 
@@ -309,48 +340,36 @@ impl Peer {
                 &[],
             )
             .await?;
-        *self
-            .inner
-            .configuration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            map_to_peer_config(&resp.configuration)?;
+        self.store(None, Some(map_to_peer_config(&resp.configuration)?));
         Ok(())
     }
 
-    /// Patch-update the peer's metadata on the server and update the cache.
+    /// Replace the peer's metadata on the server and update the cache.
+    ///
+    /// This is a full replace (HTTP `PUT`), **not** a partial patch: the
+    /// supplied map becomes the peer's entire metadata, and any keys not
+    /// present are removed. It is equivalent to
+    /// [`set_metadata`](Self::set_metadata) and exists for naming parity with
+    /// other resources. To merge into existing metadata, read the current map
+    /// (e.g. via [`get_metadata`](Self::get_metadata)), apply your changes, then
+    /// pass the merged map here.
     ///
     /// # Examples
     ///
     /// ```no_run
     /// # async fn example(peer: &honcho_ai::Peer) -> honcho_ai::error::Result<()> {
-    /// let mut patch = std::collections::HashMap::new();
-    /// patch.insert("status".into(), "active".into());
-    /// peer.update(patch).await?;
+    /// let mut meta = std::collections::HashMap::new();
+    /// meta.insert("status".into(), "active".into());
+    /// peer.update(meta).await?;
     /// # Ok(())
     /// # }
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, metadata), fields(peer_id = self.inner.id.as_str())))]
     pub async fn update(&self, metadata: HashMap<String, Value>) -> Result<()> {
-        let body = crate::types::peer::PeerMetadataSet { metadata };
-        let resp: PeerResponse = self
-            .inner
-            .http
-            .put(
-                &routes::peer(&self.inner.workspace_id, &self.inner.id)?,
-                Some(&body),
-                &[],
-            )
-            .await?;
-        *self
-            .inner
-            .metadata
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resp.metadata);
-        Ok(())
+        self.put_metadata(metadata).await
     }
 
-    // ── F5.2: Chat (non-streaming) ─────────────────────────────────────
+    // ── Chat (non-streaming) ───────────────────────────────────────────
 
     /// Send a simple non-streaming dialectic chat query.
     ///
@@ -369,27 +388,14 @@ impl Peer {
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.inner.id.as_str())))]
     pub async fn chat(&self, query: &str) -> Result<Option<String>> {
-        validate_dialectic_query(query)?;
-        let body = crate::types::dialectic::DialecticOptions {
+        let options = DialecticOptions {
             query: query.to_owned(),
             session_id: None,
             target: None,
             stream: false,
-            reasoning_level: crate::types::dialectic::ReasoningLevel::default(),
+            reasoning_level: ReasoningLevel::default(),
         };
-        let resp: ChatResponse = self
-            .inner
-            .http
-            .post(
-                &routes::peer_chat(&self.inner.workspace_id, &self.inner.id)?,
-                Some(&body),
-                &[],
-            )
-            .await?;
-        match resp.content {
-            Some(c) if !c.is_empty() => Ok(Some(c)),
-            _ => Ok(None),
-        }
+        self.chat_with_options(&options).await
     }
 
     /// Send a dialectic chat query with full options (session, target, reasoning level).
@@ -444,6 +450,7 @@ impl Peer {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn chat_stream(&self, query: impl Into<String>) -> ChatStreamBuilder {
         ChatStreamBuilder {
             http: self.inner.http.clone(),
@@ -841,7 +848,7 @@ impl Peer {
         Ok(resp.peer_card)
     }
 
-    // ── F9.8: Conclusions ──────────────────────────────────────────────
+    // ── Conclusions ────────────────────────────────────────────────────
 
     /// Get a self-scoped conclusion handle (observer = observed = self).
     ///
@@ -882,7 +889,7 @@ impl Peer {
         )
     }
 
-    // ── F5.8: Message builder (sync, no API call) ─────────────────────
+    // ── Message builder (sync, no API call) ─────────────────────────────
 
     /// Create a message builder for this peer.
     ///
@@ -1161,7 +1168,7 @@ impl RepresentationBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `HonchoError::Configuration` if `search_top_k`, `search_max_distance`,
+    /// Returns `HonchoError::Validation` if `search_top_k`, `search_max_distance`,
     /// or `max_conclusions` are out of range.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.peer_id.as_str())))]
     pub async fn send(self) -> Result<String> {
@@ -1319,10 +1326,11 @@ impl ContextBuilder {
     }
 }
 
-/// Synchronous builder for [`MessageCreate`] params.
-///
+// Maximum allowed message content length, in characters.
 const MAX_MESSAGE_CONTENT_LENGTH: usize = 25_000;
 
+/// Synchronous builder for [`MessageCreate`] params.
+///
 /// Created via [`Peer::message()`]. Does **not** send any API request.
 pub struct MessageBuilder {
     peer_id: String,
@@ -1400,11 +1408,10 @@ impl MessageBuilder {
         if self.content.trim().is_empty() {
             return Err(HonchoError::Validation("content must not be empty".into()));
         }
-        if self.content.len() > MAX_MESSAGE_CONTENT_LENGTH {
+        let char_count = self.content.chars().count();
+        if char_count > MAX_MESSAGE_CONTENT_LENGTH {
             return Err(HonchoError::Validation(format!(
-                "content must be at most {} characters, got {}",
-                MAX_MESSAGE_CONTENT_LENGTH,
-                self.content.len(),
+                "content must be at most {MAX_MESSAGE_CONTENT_LENGTH} characters, got {char_count}"
             )));
         }
         Ok(MessageCreate {
@@ -1417,40 +1424,25 @@ impl MessageBuilder {
     }
 }
 
-fn validate_search_params(
-    search_top_k: Option<u32>,
-    search_max_distance: Option<f64>,
-    max_conclusions: Option<u32>,
-) -> Result<()> {
-    if let Some(k) = search_top_k
-        && !(1..=100).contains(&k)
-    {
-        return Err(HonchoError::Validation(format!(
-            "search_top_k must be between 1 and 100, got {k}"
-        )));
-    }
-    if let Some(d) = search_max_distance
-        && !(0.0..=1.0).contains(&d)
-    {
-        return Err(HonchoError::Validation(format!(
-            "search_max_distance must be between 0.0 and 1.0, got {d}"
-        )));
-    }
-    if let Some(c) = max_conclusions
-        && !(1..=100).contains(&c)
-    {
-        return Err(HonchoError::Validation(format!(
-            "max_conclusions must be between 1 and 100, got {c}"
-        )));
-    }
-    Ok(())
-}
-
-fn map_to_peer_config(map: &HashMap<String, Value>) -> Result<Option<PeerConfig>> {
-    let val = serde_json::to_value(map).map_err(|e| HonchoError::Configuration(e.to_string()))?;
-    serde_json::from_value(val)
-        .map(Some)
-        .map_err(|e| HonchoError::Configuration(e.to_string()))
+/// Parse a raw configuration map into a typed [`PeerConfig`].
+///
+/// Reads the known boolean fields directly from `map`, avoiding the
+/// `HashMap -> Value -> PeerConfig` round-trip (and its two allocations).
+/// Unknown keys are ignored; a present-but-non-boolean value is an error.
+fn map_to_peer_config(map: &HashMap<String, Value>) -> Result<PeerConfig> {
+    let field_bool = |key: &str| -> Result<Option<bool>> {
+        match map.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(other) => Err(HonchoError::Configuration(format!(
+                "peer configuration field `{key}` must be a boolean, got {other}"
+            ))),
+        }
+    };
+    Ok(PeerConfig {
+        observe_me: field_bool("observe_me")?,
+        observe_others: field_bool("observe_others")?,
+    })
 }
 
 #[cfg(test)]
@@ -1478,5 +1470,193 @@ mod tests {
         ) {
             assert_send_static(&stream);
         }
+    }
+
+    fn peer_with_base_url(base_url: &str) -> Peer {
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(base_url)
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+        let resp = PeerResponse {
+            id: "p".into(),
+            workspace_id: "ws".into(),
+            created_at: chrono::Utc::now(),
+            metadata: HashMap::new(),
+            configuration: HashMap::new(),
+        };
+        Peer::from_parts(http, "ws".into(), resp).unwrap()
+    }
+
+    fn message_builder(content: &str) -> MessageBuilder {
+        MessageBuilder {
+            peer_id: "p".into(),
+            content: content.to_string(),
+            metadata: None,
+            configuration: None,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn build_allows_multibyte_content_up_to_char_limit() {
+        // 20_000 two-byte chars: 40_000 bytes but only 20_000 chars. The byte
+        // length exceeds the limit while the char count does not, so the
+        // char-based check must accept it.
+        let content = "ą".repeat(20_000);
+        assert!(content.len() > MAX_MESSAGE_CONTENT_LENGTH);
+        assert!(content.chars().count() <= MAX_MESSAGE_CONTENT_LENGTH);
+        assert!(message_builder(&content).build().is_ok());
+    }
+
+    #[test]
+    fn build_accepts_exactly_char_limit() {
+        let content = "ä".repeat(MAX_MESSAGE_CONTENT_LENGTH);
+        assert!(message_builder(&content).build().is_ok());
+    }
+
+    #[test]
+    fn build_rejects_content_over_char_limit() {
+        let content = "a".repeat(MAX_MESSAGE_CONTENT_LENGTH + 1);
+        let err = message_builder(&content).build().unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+    }
+
+    #[test]
+    fn cache_snapshot_is_consistent_under_concurrency() {
+        use std::sync::Arc as StdArc;
+        use std::thread;
+
+        let peer = StdArc::new(peer_with_base_url("http://localhost:1"));
+
+        let writer = {
+            let peer = peer.clone();
+            thread::spawn(move || {
+                for i in 0..20_000u64 {
+                    let flag = i % 2 == 0;
+                    let mut meta = HashMap::new();
+                    meta.insert("flag".to_string(), Value::Bool(flag));
+                    let config = PeerConfig {
+                        observe_me: Some(flag),
+                        observe_others: None,
+                    };
+                    // Single atomic store swaps both fields under one lock.
+                    peer.store(Some(meta), Some(config));
+                }
+            })
+        };
+
+        // Each single-lock snapshot must pair matching metadata + configuration;
+        // with two separate locks the reader could observe a torn pair.
+        for _ in 0..20_000 {
+            let snap = peer.read_cache();
+            let meta_flag = snap
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("flag"))
+                .and_then(Value::as_bool);
+            let cfg_flag = snap.configuration.as_ref().and_then(|c| c.observe_me);
+            drop(snap);
+            if let (Some(m), Some(c)) = (meta_flag, cfg_flag) {
+                assert_eq!(m, c, "torn snapshot: metadata flag != configuration flag");
+            }
+        }
+
+        writer.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_configuration_returns_own_fetched_value_under_concurrency() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Server always reports `observe_me: true` — the value this caller owns.
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws/peers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "p",
+                "workspace_id": "ws",
+                "created_at": "2024-01-01T00:00:00Z",
+                "metadata": {},
+                "configuration": {"observe_me": true}
+            })))
+            .mount(&server)
+            .await;
+
+        let peer = StdArc::new(peer_with_base_url(&server.uri()));
+
+        // Background writer hammers the cache with the OPPOSITE configuration.
+        // With the old read-after-store logic, `get_configuration` could pick up
+        // this `observe_me: false` instead of its own fetched `true`.
+        let stop = StdArc::new(AtomicBool::new(false));
+        let writer = {
+            let peer = peer.clone();
+            let stop = stop.clone();
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peer.store(
+                        None,
+                        Some(PeerConfig {
+                            observe_me: Some(false),
+                            observe_others: None,
+                        }),
+                    );
+                }
+            })
+        };
+
+        // Every fetch must return this caller's own configuration.
+        for _ in 0..200 {
+            let config = peer.get_configuration().await.unwrap();
+            assert_eq!(
+                config.observe_me,
+                Some(true),
+                "get_configuration returned a concurrently-stored value, not its own fetched response"
+            );
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_performs_full_put_replace() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let peer = peer_with_base_url(&server.uri());
+
+        let mut meta = HashMap::new();
+        meta.insert("status".to_string(), Value::String("active".into()));
+
+        // REPLACE semantics: the request body is exactly the supplied map
+        // (a full PUT), not a partial patch merged server-side.
+        Mock::given(method("PUT"))
+            .and(path("/v3/workspaces/ws/peers/p"))
+            .and(body_json(
+                serde_json::json!({"metadata": {"status": "active"}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "p",
+                "workspace_id": "ws",
+                "created_at": "2024-01-01T00:00:00Z",
+                "metadata": {"status": "active"},
+                "configuration": {}
+            })))
+            .mount(&server)
+            .await;
+
+        peer.update(meta).await.unwrap();
+
+        let cached = peer.metadata().unwrap();
+        assert_eq!(cached.get("status"), Some(&Value::String("active".into())));
     }
 }
