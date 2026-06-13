@@ -61,7 +61,12 @@ pub enum HonchoError {
         /// Suggested wait time from Retry-After header.
         retry_after: Option<Duration>,
     },
-    /// 4xx Client Error (unmapped status codes like 405, 408, 413, etc.)
+    /// Unmapped or unexpected HTTP status not covered by a dedicated variant.
+    ///
+    /// `from_response` routes every 4xx status without a dedicated variant here
+    /// (e.g. 405, 408, 413), as well as unexpected 3xx redirects and any other
+    /// status that does not match a known category (e.g. `600+` from a
+    /// misbehaving proxy). The `status` field preserves the original code.
     #[error("Honcho API error: HTTP {status} {message}")]
     Client {
         /// HTTP status code.
@@ -178,17 +183,32 @@ impl HonchoError {
     }
 
     /// Returns whether the error matches the SDK retry policy.
+    ///
+    /// `PartialFailure` is **never** retryable: the chunked batch already sent
+    /// earlier messages, so auto-retrying the whole request would duplicate
+    /// them. This is intentionally decoupled from
+    /// [`retry_after`](Self::retry_after), which still surfaces any
+    /// `Retry-After` hint from the underlying error so callers can decide how
+    /// long to wait before a manual retry.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
+        if matches!(self, Self::PartialFailure { .. }) {
+            return false;
+        }
         matches!(self, Self::Timeout { .. } | Self::Connection { .. })
             || matches!(self.status_code(), Some(429 | 500 | 502 | 503 | 504))
     }
 
     /// Returns the suggested wait time for rate-limited requests.
+    ///
+    /// For [`PartialFailure`](Self::PartialFailure), delegates to the underlying
+    /// error so callers still learn how long to wait even though the batch is
+    /// not auto-retried (see [`is_retryable`](Self::is_retryable)).
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::RateLimit { retry_after, .. } => *retry_after,
+            Self::PartialFailure { error, .. } => error.retry_after(),
             _ => None,
         }
     }
@@ -214,7 +234,15 @@ impl HonchoError {
     }
 
     /// Returns the human-readable error message.
+    ///
+    /// **Limitation (planned for a future breaking change):** for `Transport`,
+    /// `Io`, and `Decode` the returned string is a fixed placeholder rather
+    /// than the underlying source error's detail. Inspect the source via
+    /// [`Error::source`](std::error::Error::source) for the full description.
     #[must_use]
+    // Each variant maps 1:1 to its `message` field today, so several arms look
+    // textually identical. Kept explicit per-variant for readability; the arms
+    // will diverge once the planned PR6 `message() -> Cow` change lands.
     #[allow(clippy::match_same_arms)]
     pub fn message(&self) -> &str {
         match self {
@@ -248,13 +276,13 @@ pub type Result<T> = std::result::Result<T, HonchoError>;
 #[must_use]
 pub fn parse_error_body(body: &[u8]) -> (String, Option<serde_json::Value>) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        let msg = String::from_utf8_lossy(body).to_string();
+        let msg = String::from_utf8_lossy(body).into_owned();
         return (msg, None);
     };
 
     if let Some(obj) = value.as_object() {
-        if let Some(detail) = obj.get("detail").and_then(|v| v.as_str()) {
-            return (detail.to_string(), Some(value));
+        if let Some(readable) = obj.get("detail").and_then(detail_message) {
+            return (readable, Some(value));
         }
         if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
             return (message.to_string(), Some(value));
@@ -272,16 +300,68 @@ pub fn parse_error_body(body: &[u8]) -> (String, Option<serde_json::Value>) {
     (value.to_string(), Some(value))
 }
 
+/// Build a human-readable message from a `detail` JSON value.
+///
+/// `FastAPI` returns validation errors as an array of objects, each typically
+/// shaped like `{"loc": [...], "msg": "...", "type": "..."}`. Without this
+/// helper the whole array would be stringified into the error message. We
+/// instead join the `"msg"` fields (or bare strings) with `"; "`.
+///
+/// Returns `None` when no readable text can be extracted, so the caller can
+/// fall back to other fields or the raw JSON.
+fn detail_message(detail: &serde_json::Value) -> Option<String> {
+    match detail {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter().filter_map(item_message).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("; "))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract a single readable message from one element of a `FastAPI` `detail` array.
+fn item_message(item: &serde_json::Value) -> Option<String> {
+    match item {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(obj) => {
+            obj.get("msg").and_then(|m| m.as_str()).map(str::to_owned)
+        }
+        _ => None,
+    }
+}
+
 /// Parse a Retry-After header value.
 ///
-/// Accepts either seconds (f64) or HTTP-date format.
-/// Returns `None` if the value cannot be parsed.
-/// Clamps negative durations to zero (parity with Python's `max(0.0, ...)`).
+/// Accepts either seconds (parsed as `f64`) or HTTP-date format
+/// ([RFC 9110](https://datatracker.ietf.org/doc/html/rfc9110) §10.2.3
+/// "Retry-After").
+///
+/// The accepted format is **looser** than RFC 9110: the standard only permits
+/// non-negative integer seconds (e.g. `"120"`) or an HTTP-date, but this
+/// parser uses `str::parse::<f64>()`, which additionally accepts values like
+/// `"+5"`, `"1e3"`, and `"inf"`. Non-finite values (`NaN`, `±inf`) and
+/// magnitudes beyond `Duration::MAX` are rejected and yield `None` rather than
+/// panicking — important because the header is attacker/proxy controlled.
+///
+/// Returns `None` if the value cannot be parsed. Negative seconds are clamped
+/// to zero (parity with Python's `max(0.0, ...)`).
+#[must_use]
 pub fn parse_retry_after(value: &HeaderValue, now: DateTime<Utc>) -> Option<Duration> {
     let s = value.to_str().ok()?;
 
     if let Ok(secs) = s.parse::<f64>() {
-        return Some(Duration::from_secs_f64(secs.max(0.0)));
+        // Reject non-finite values explicitly: `f64::max` ignores NaN and would
+        // otherwise turn `NaN`/`-inf` into `0.0` (returning the non-NaN operand),
+        // contradicting the documented "non-finite -> None" contract.
+        if !secs.is_finite() {
+            return None;
+        }
+        return Duration::try_from_secs_f64(secs.max(0.0)).ok();
     }
 
     let target = parse_http_date(s).ok()?;
@@ -293,6 +373,7 @@ pub fn parse_retry_after(value: &HeaderValue, now: DateTime<Utc>) -> Option<Dura
 }
 
 /// Construct a `HonchoError` from an HTTP response.
+#[must_use]
 pub fn from_response(
     status: StatusCode,
     headers: &HeaderMap,
@@ -334,7 +415,7 @@ pub fn from_response(
         },
         _ => HonchoError::Client {
             status: status.as_u16(),
-            message: format!("unexpected response status {status}"),
+            message: format!("unexpected response status {}", status.as_u16()),
         },
     }
 }
