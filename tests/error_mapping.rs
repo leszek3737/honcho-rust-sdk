@@ -187,13 +187,20 @@ fn parse_retry_after_seconds_valid(#[case] raw: &str, #[case] expected: Option<D
 #[case("inf")]
 #[case("infinity")]
 #[case("1e300")]
+// Non-finite values that `f64::max(0.0)` would silently coerce to 0.0 (it
+// ignores NaN and returns the other operand) — must be rejected as None, not
+// turned into "retry immediately".
+#[case("nan")]
+#[case("NaN")]
+#[case("-inf")]
+#[case("-infinity")]
 fn parse_retry_after_overflow_returns_none_not_panic(#[case] raw: &str) {
     // Regression: previously `Duration::from_secs_f64` panicked on inf/overflow.
-    // Agreed contract: `try_from_secs_f64(...).ok()` → None. MUST NOT panic.
+    // Agreed contract: non-finite/overflow → None. MUST NOT panic.
     let mut headers = HeaderMap::new();
     headers.insert("retry-after", HeaderValue::from_str(raw).unwrap());
     let result = parse_retry_after(headers.get("retry-after").unwrap(), now());
-    assert_eq!(result, None, "inf/overflow should be None, not panic");
+    assert_eq!(result, None, "non-finite/overflow should be None, not panic");
 }
 
 #[test]

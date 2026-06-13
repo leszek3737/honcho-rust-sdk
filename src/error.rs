@@ -281,9 +281,7 @@ pub fn parse_error_body(body: &[u8]) -> (String, Option<serde_json::Value>) {
     };
 
     if let Some(obj) = value.as_object() {
-        if let Some(detail) = obj.get("detail")
-            && let Some(readable) = detail_message(detail)
-        {
+        if let Some(readable) = obj.get("detail").and_then(detail_message) {
             return (readable, Some(value));
         }
         if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
@@ -330,10 +328,9 @@ fn detail_message(detail: &serde_json::Value) -> Option<String> {
 fn item_message(item: &serde_json::Value) -> Option<String> {
     match item {
         serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(obj) => obj
-            .get("msg")
-            .and_then(|m| m.as_str())
-            .map(std::string::ToString::to_string),
+        serde_json::Value::Object(obj) => {
+            obj.get("msg").and_then(|m| m.as_str()).map(str::to_owned)
+        }
         _ => None,
     }
 }
@@ -358,6 +355,12 @@ pub fn parse_retry_after(value: &HeaderValue, now: DateTime<Utc>) -> Option<Dura
     let s = value.to_str().ok()?;
 
     if let Ok(secs) = s.parse::<f64>() {
+        // Reject non-finite values explicitly: `f64::max` ignores NaN and would
+        // otherwise turn `NaN`/`-inf` into `0.0` (returning the non-NaN operand),
+        // contradicting the documented "non-finite -> None" contract.
+        if !secs.is_finite() {
+            return None;
+        }
         return Duration::try_from_secs_f64(secs.max(0.0)).ok();
     }
 
