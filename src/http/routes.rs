@@ -4,6 +4,11 @@ use crate::error::{HonchoError, Result};
 
 pub(crate) const API_BASE_PATH: &str = "v3";
 
+/// Percent-encode a path segment.
+///
+/// Encodes all characters except unreserved chars (`A-Za-z0-9-._~`).
+/// Importantly, this encodes `/` to `%2F`, preventing segment-injection attacks
+/// where a crafted ID could escape its path segment.
 fn encode(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
@@ -19,11 +24,63 @@ fn encode(s: &str) -> String {
     encoded
 }
 
-fn validate_not_empty(id: &str, name: &str) -> Result<()> {
-    if id.is_empty() {
-        return Err(HonchoError::Validation(format!("{name} must not be empty")));
+/// Validate that an ID is not empty, whitespace-only, or a dot-segment.
+///
+/// Dot-segments (`.` / `..` and their `%2e` spellings) are rejected because
+/// URL parsers normalize them away, enabling path-traversal attacks.
+///
+/// Note: the *primary* defense against traversal is [`encode`], which
+/// percent-encodes `%` (and `/`), so a percent-encoded dot like `%2e` becomes
+/// the literal `%252e` and can never collapse to `..`. The literal `.` / `..`
+/// rejection here is essential because `.` is an unreserved character that
+/// [`encode`] leaves untouched. The `%2e` checks below are belt-and-suspenders
+/// defense-in-depth, kept consistent across all spellings.
+fn validate_id(id: &str, name: &str) -> Result<()> {
+    if id.trim().is_empty() {
+        return Err(HonchoError::Validation(format!(
+            "{name} must not be empty or whitespace-only"
+        )));
+    }
+    // Reject dot-segments and every percent-encoded / mixed spelling.
+    // WHATWG URL parsers collapse "." and ".." (and %2e/%2E, including mixed
+    // forms like ".%2e" / "%2e.") during normalization, which would let
+    // `workspace("..")` escape its path segment.
+    let lower = id.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."
+    ) {
+        return Err(HonchoError::Validation(format!(
+            "{name} must not be a dot-segment ('.' or '..')"
+        )));
     }
     Ok(())
+}
+
+/// Generate a route builder function.
+///
+/// Each parameter is validated via [`validate_id`] then percent-encoded via
+/// [`encode`] and interpolated into the path template using named format args.
+/// This centralizes the validation + encoding contract so it cannot drift
+/// across the ~30 route builders.
+macro_rules! route {
+    (
+        $(#[doc = $doc:literal])*
+        $vis:vis fn $name:ident(
+            $($param:ident : $param_name:literal),* $(,)?
+        ) -> Result<String> {
+            $template:literal
+        }
+    ) => {
+        $(#[doc = $doc])*
+        $vis fn $name($($param: &str),*) -> Result<String> {
+            $(validate_id($param, $param_name)?;)*
+            Ok(format!(
+                $template,
+                $($param = encode($param)),*
+            ))
+        }
+    };
 }
 
 /// Builds path for listing all workspaces.
@@ -36,323 +93,301 @@ pub(crate) fn workspaces_list() -> String {
     format!("/{API_BASE_PATH}/workspaces/list")
 }
 
-/// Builds path for a specific workspace.
-pub(crate) fn workspace(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for a specific workspace.
+    pub(crate) fn workspace(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}"
+    }
 }
 
-/// Builds path for workspace search.
-pub(crate) fn workspace_search(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/search",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for workspace search.
+    pub(crate) fn workspace_search(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/search"
+    }
 }
 
-/// Builds path for workspace queue status.
-pub(crate) fn workspace_queue_status(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/queue/status",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for workspace queue status.
+    pub(crate) fn workspace_queue_status(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/queue/status"
+    }
 }
 
-/// Builds path for scheduling a dream in a workspace.
-pub(crate) fn workspace_schedule_dream(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/schedule_dream",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for scheduling a dream in a workspace.
+    pub(crate) fn workspace_schedule_dream(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/schedule_dream"
+    }
 }
 
-/// Builds path for listing peers in a workspace.
-pub(crate) fn peers(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for listing peers in a workspace.
+    pub(crate) fn peers(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers"
+    }
 }
 
-/// Builds path for the peer list endpoint.
-pub(crate) fn peers_list(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/list",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for the peer list endpoint.
+    pub(crate) fn peers_list(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/list"
+    }
 }
 
-/// Builds path for a specific peer.
-pub(crate) fn peer(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for a specific peer.
+    pub(crate) fn peer(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}"
+    }
 }
 
-/// Builds path for peer chat.
-pub(crate) fn peer_chat(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}/chat",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for peer chat.
+    pub(crate) fn peer_chat(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}/chat"
+    }
 }
 
-/// Builds path for peer representation.
-pub(crate) fn peer_representation(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}/representation",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for peer representation.
+    pub(crate) fn peer_representation(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}/representation"
+    }
 }
 
-/// Builds path for peer card.
-pub(crate) fn peer_card(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}/card",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for peer card.
+    pub(crate) fn peer_card(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}/card"
+    }
 }
 
-/// Builds path for peer context.
-pub(crate) fn peer_context(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}/context",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for peer context.
+    pub(crate) fn peer_context(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}/context"
+    }
 }
 
-/// Builds path for peer search.
-pub(crate) fn peer_search(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}/search",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for peer search.
+    pub(crate) fn peer_search(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}/search"
+    }
 }
 
-/// Builds path for listing sessions of a peer.
-pub(crate) fn peer_sessions_list(workspace_id: &str, peer_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/peers/{}/sessions",
-        encode(workspace_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for listing sessions of a peer.
+    pub(crate) fn peer_sessions_list(
+        workspace_id: "workspace_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/peers/{peer_id}/sessions"
+    }
 }
 
-/// Builds path for listing sessions in a workspace.
-pub(crate) fn sessions(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for listing sessions in a workspace.
+    pub(crate) fn sessions(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions"
+    }
 }
 
-/// Builds path for the session list endpoint.
-pub(crate) fn sessions_list(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/list",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for the session list endpoint.
+    pub(crate) fn sessions_list(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/list"
+    }
 }
 
-/// Builds path for a specific session.
-pub(crate) fn session(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for a specific session.
+    pub(crate) fn session(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}"
+    }
 }
 
-/// Builds path for cloning a session.
-pub(crate) fn session_clone(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/clone",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for cloning a session.
+    pub(crate) fn session_clone(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/clone"
+    }
 }
 
-/// Builds path for session context.
-pub(crate) fn session_context(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/context",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for session context.
+    pub(crate) fn session_context(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/context"
+    }
 }
 
-/// Builds path for session summaries.
-pub(crate) fn session_summaries(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/summaries",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for session summaries.
+    pub(crate) fn session_summaries(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/summaries"
+    }
 }
 
-/// Builds path for session search.
-pub(crate) fn session_search(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/search",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for session search.
+    pub(crate) fn session_search(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/search"
+    }
 }
 
-/// Builds path for listing peers in a session.
-pub(crate) fn session_peers(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/peers",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for listing peers in a session.
+    pub(crate) fn session_peers(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/peers"
+    }
 }
 
-/// Builds path for per-peer session configuration.
-pub(crate) fn session_peer_config(
-    workspace_id: &str,
-    session_id: &str,
-    peer_id: &str,
-) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    validate_not_empty(peer_id, "peer_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/peers/{}/config",
-        encode(workspace_id),
-        encode(session_id),
-        encode(peer_id)
-    ))
+route! {
+    /// Builds path for per-peer session configuration.
+    pub(crate) fn session_peer_config(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+        peer_id: "peer_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/peers/{peer_id}/config"
+    }
 }
 
-/// Builds path for listing messages in a session.
-pub(crate) fn messages(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for listing messages in a session.
+    pub(crate) fn messages(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/messages"
+    }
 }
 
-/// Builds path for the message list endpoint.
-pub(crate) fn messages_list(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages/list",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for the message list endpoint.
+    pub(crate) fn messages_list(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/messages/list"
+    }
 }
 
-/// Builds path for a specific message.
-pub(crate) fn message(workspace_id: &str, session_id: &str, message_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    validate_not_empty(message_id, "message_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages/{}",
-        encode(workspace_id),
-        encode(session_id),
-        encode(message_id)
-    ))
+route! {
+    /// Builds path for a specific message.
+    pub(crate) fn message(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+        message_id: "message_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/messages/{message_id}"
+    }
 }
 
-/// Builds path for uploading a file to a session.
-pub(crate) fn messages_upload(workspace_id: &str, session_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(session_id, "session_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/sessions/{}/messages/upload",
-        encode(workspace_id),
-        encode(session_id)
-    ))
+route! {
+    /// Builds path for uploading a file to a session.
+    pub(crate) fn messages_upload(
+        workspace_id: "workspace_id",
+        session_id: "session_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/sessions/{session_id}/messages/upload"
+    }
 }
 
-/// Builds path for listing conclusions in a workspace.
-pub(crate) fn conclusions(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/conclusions",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for listing conclusions in a workspace.
+    pub(crate) fn conclusions(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/conclusions"
+    }
 }
 
-/// Builds path for the conclusions list endpoint.
-pub(crate) fn conclusions_list(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/conclusions/list",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for the conclusions list endpoint.
+    pub(crate) fn conclusions_list(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/conclusions/list"
+    }
 }
 
-/// Builds path for querying conclusions.
-pub(crate) fn conclusions_query(workspace_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/conclusions/query",
-        encode(workspace_id)
-    ))
+route! {
+    /// Builds path for querying conclusions.
+    pub(crate) fn conclusions_query(
+        workspace_id: "workspace_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/conclusions/query"
+    }
 }
 
-/// Builds path for a specific conclusion.
-pub(crate) fn conclusion(workspace_id: &str, conclusion_id: &str) -> Result<String> {
-    validate_not_empty(workspace_id, "workspace_id")?;
-    validate_not_empty(conclusion_id, "conclusion_id")?;
-    Ok(format!(
-        "/{API_BASE_PATH}/workspaces/{}/conclusions/{}",
-        encode(workspace_id),
-        encode(conclusion_id)
-    ))
+route! {
+    /// Builds path for a specific conclusion.
+    pub(crate) fn conclusion(
+        workspace_id: "workspace_id",
+        conclusion_id: "conclusion_id",
+    ) -> Result<String> {
+        "/{API_BASE_PATH}/workspaces/{workspace_id}/conclusions/{conclusion_id}"
+    }
 }
 
 /// Builds path for deleting a conclusion (same path as get).
+///
+/// This is a semantic alias of [`conclusion`] kept for call-site readability.
+#[inline]
 pub(crate) fn conclusion_delete(workspace_id: &str, conclusion_id: &str) -> Result<String> {
     conclusion(workspace_id, conclusion_id)
 }
@@ -634,5 +669,76 @@ mod tests {
         let err = conclusion("ws1", "").unwrap_err();
         assert!(matches!(err, HonchoError::Validation(_)));
         assert!(format!("{err}").contains("conclusion_id"));
+    }
+
+    #[test]
+    fn test_workspace_dot_segment_rejected() {
+        assert!(matches!(
+            workspace(".").unwrap_err(),
+            HonchoError::Validation(_)
+        ));
+        assert!(matches!(
+            workspace("..").unwrap_err(),
+            HonchoError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn test_workspace_percent_encoded_dot_rejected() {
+        assert!(matches!(
+            workspace("%2e").unwrap_err(),
+            HonchoError::Validation(_)
+        ));
+        assert!(matches!(
+            workspace("%2e%2e").unwrap_err(),
+            HonchoError::Validation(_)
+        ));
+        assert!(matches!(
+            workspace("%2E").unwrap_err(),
+            HonchoError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn test_workspace_mixed_encoded_dot_rejected() {
+        for id in [".%2e", "%2e.", ".%2E", "%2E."] {
+            assert!(
+                matches!(workspace(id).unwrap_err(), HonchoError::Validation(_)),
+                "mixed dot-segment {id:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_whitespace_only_rejected() {
+        assert!(matches!(
+            workspace("   ").unwrap_err(),
+            HonchoError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn test_encode_space() {
+        assert_eq!(encode("hello world"), "hello%20world");
+    }
+
+    #[test]
+    fn test_encode_slash() {
+        assert_eq!(encode("a/b"), "a%2Fb");
+    }
+
+    #[test]
+    fn test_encode_unicode() {
+        assert_eq!(encode("café"), "caf%C3%A9");
+    }
+
+    #[test]
+    fn test_encode_percent() {
+        assert_eq!(encode("100%"), "100%25");
+    }
+
+    #[test]
+    fn test_encode_unreserved() {
+        assert_eq!(encode("A-Z.0-9_-~"), "A-Z.0-9_-~");
     }
 }

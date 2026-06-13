@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,57 @@ fn is_idempotent(method: &Method) -> bool {
 pub(crate) const DEFAULT_MAX_RETRIES: u32 = 2;
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// Maximum delay honored from a `retry-after` header. If the server requests
+/// a longer delay, we stop retrying and return the API error instead of
+/// sleeping for an unbounded amount of time.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// HTTP status codes that are worth retrying for idempotent requests.
+const RETRYABLE_STATUS: &[u16] = &[408, 429, 500, 502, 503, 504];
+
+fn is_retryable_status(status: u16) -> bool {
+    RETRYABLE_STATUS.contains(&status)
+}
+
+/// Map a reqwest send error to the appropriate [`HonchoError`].
+fn map_send_error(e: reqwest::Error) -> HonchoError {
+    if e.is_timeout() {
+        HonchoError::Timeout {
+            message: e.to_string(),
+        }
+    } else if e.is_connect() {
+        HonchoError::Connection {
+            message: e.to_string(),
+        }
+    } else {
+        HonchoError::Transport(e)
+    }
+}
+
+/// Returns `true` if the error is transient and worth retrying.
+fn is_send_error_retryable(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect()
+}
+
+/// Error for when the response body cannot be read after receiving a status.
+fn body_read_error(status: reqwest::StatusCode) -> HonchoError {
+    let msg = format!(
+        "request failed with status {} (could not read response body)",
+        status.as_u16()
+    );
+    if status.is_server_error() {
+        HonchoError::Server {
+            status: status.as_u16(),
+            message: msg,
+        }
+    } else {
+        HonchoError::Client {
+            status: status.as_u16(),
+            message: msg,
+        }
+    }
+}
 
 pub(crate) fn normalize_base_url(base_url: &str) -> Result<Url> {
     let mut base_url = Url::parse(base_url)
@@ -90,11 +142,6 @@ impl HttpClient {
         HttpClientParams::builder()
     }
 
-    #[expect(dead_code)]
-    pub(crate) fn base_url_hint(&self) -> String {
-        self.inner.base_url.to_string()
-    }
-
     /// Build a full URL by appending `path` to the base URL.
     ///
     /// Unlike [`Url::join`], an absolute `path` (e.g. `/v3/workspaces`) does NOT
@@ -128,14 +175,24 @@ impl HttpClient {
         client_headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
         if let Some(ref key) = params.api_key {
-            let val = HeaderValue::from_str(&format!("Bearer {key}"))
+            let mut val = HeaderValue::from_str(&format!("Bearer {key}"))
                 .map_err(|e| HonchoError::Configuration(format!("invalid api_key: {e}")))?;
+            val.set_sensitive(true);
             client_headers.insert(AUTHORIZATION, val);
         }
 
+        let mut last_name: Option<reqwest::header::HeaderName> = None;
         for (name, value) in params.default_headers {
-            if let Some(n) = name {
-                let _ = client_headers.insert(n, value);
+            match name {
+                Some(n) => {
+                    let _ = client_headers.insert(n.clone(), value);
+                    last_name = Some(n);
+                }
+                None => {
+                    if let Some(ref n) = last_name {
+                        client_headers.append(n.clone(), value);
+                    }
+                }
             }
         }
 
@@ -143,13 +200,17 @@ impl HttpClient {
             Some(c) => (c, client_headers),
             None => (
                 reqwest::ClientBuilder::new()
-                    .default_headers(client_headers)
                     .timeout(params.timeout)
                     .build()
                     .map_err(|e| {
                         HonchoError::Configuration(format!("failed to build HTTP client: {e}"))
                     })?,
-                HeaderMap::new(),
+                // Keep headers as per-request extras instead of Client defaults:
+                // reqwest's default-header application only inserts the first value
+                // for multi-value headers (Vacant-entry check in execute_request).
+                // Per-request `RequestBuilder::headers()` uses `replace_headers`
+                // which correctly preserves multi-value headers.
+                client_headers,
             ),
         };
 
@@ -165,6 +226,12 @@ impl HttpClient {
         })
     }
 
+    /// Execute an HTTP request with retry, timeout, and error handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`HonchoError`] variant when the request fails due to a
+    /// timeout, connection error, non-success status code, or decode failure.
     pub(crate) async fn request<TBody, TResp>(
         &self,
         method: Method,
@@ -203,20 +270,8 @@ impl HttpClient {
             let response = match req_builder.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    let error = if e.is_timeout() {
-                        HonchoError::Timeout {
-                            message: e.to_string(),
-                        }
-                    } else if e.is_connect() || e.is_request() {
-                        HonchoError::Connection {
-                            message: e.to_string(),
-                        }
-                    } else {
-                        HonchoError::Transport(e)
-                    };
-
                     let should_retry = is_idempotent(&method)
-                        && !matches!(error, HonchoError::Transport(_))
+                        && is_send_error_retryable(&e)
                         && attempt < self.inner.max_retries;
 
                     if should_retry {
@@ -225,7 +280,7 @@ impl HttpClient {
                         continue;
                     }
 
-                    return Err(error);
+                    return Err(map_send_error(e));
                 }
             };
 
@@ -237,32 +292,21 @@ impl HttpClient {
 
             let headers = response.headers().clone();
             let Ok(body_bytes) = response.bytes().await else {
-                let msg = format!(
-                    "request failed with status {} (could not read response body)",
-                    status.as_u16()
-                );
-                return Err(if status.is_server_error() {
-                    HonchoError::Server {
-                        status: status.as_u16(),
-                        message: msg,
-                    }
-                } else {
-                    HonchoError::Client {
-                        status: status.as_u16(),
-                        message: msg,
-                    }
-                });
+                return Err(body_read_error(status));
             };
             let api_error = error::from_response(status, &headers, &body_bytes, Utc::now());
 
-            let is_retryable =
-                is_idempotent(&method) && matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
+            let is_retryable = is_idempotent(&method) && is_retryable_status(status.as_u16());
 
             if is_retryable && attempt < self.inner.max_retries {
                 let retry_after = headers
                     .get("retry-after")
                     .and_then(|v| error::parse_retry_after(v, Utc::now()));
-                let delay = retry_after.unwrap_or_else(|| jittered_delay(attempt));
+                let delay = match retry_after {
+                    Some(d) if d > MAX_RETRY_AFTER => return Err(api_error),
+                    Some(d) => d,
+                    None => jittered_delay(attempt),
+                };
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
@@ -289,16 +333,21 @@ impl HttpClient {
         if bytes.is_empty() {
             return serde_json::from_value::<TResp>(serde_json::Value::Null).map_err(|e| {
                 HonchoError::Decode {
-                    path: String::new(),
+                    path: ".".to_string(),
                     source: e,
                 }
             });
         }
 
-        match decode::deserialize_with_path(&bytes) {
+        match decode::deserialize_with_path::<TResp>(&bytes) {
             Ok(val) => Ok(val),
             Err(decode_err) => {
-                if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() {
+                // Only fall back to Null deserialization for the unit type (),
+                // where an empty/mismatched body is expected to yield Ok(()).
+                // For all other types (including Option<T>), a decode failure
+                // must be surfaced — returning Ok(None) would silently mask
+                // a real-but-incompatible payload.
+                if TypeId::of::<TResp>() == TypeId::of::<()>() {
                     serde_json::from_value::<TResp>(serde_json::Value::Null).map_err(|_| decode_err)
                 } else {
                     Err(decode_err)
@@ -343,6 +392,12 @@ impl HttpClient {
             .await
     }
 
+    /// Execute a multipart upload request with retry, timeout, and error handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`HonchoError`] variant when the request fails due to a
+    /// timeout, connection error, non-success status code, or decode failure.
     pub(crate) async fn request_multipart<TResp, F, Fut>(
         &self,
         method: Method,
@@ -384,20 +439,8 @@ impl HttpClient {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    let error = if e.is_timeout() {
-                        HonchoError::Timeout {
-                            message: e.to_string(),
-                        }
-                    } else if e.is_connect() || e.is_request() {
-                        HonchoError::Connection {
-                            message: e.to_string(),
-                        }
-                    } else {
-                        HonchoError::Transport(e)
-                    };
-
                     let should_retry = is_idempotent(&method)
-                        && !matches!(error, HonchoError::Transport(_))
+                        && is_send_error_retryable(&e)
                         && attempt < self.inner.max_retries;
 
                     if should_retry {
@@ -406,7 +449,7 @@ impl HttpClient {
                         continue;
                     }
 
-                    return Err(error);
+                    return Err(map_send_error(e));
                 }
             };
 
@@ -418,32 +461,21 @@ impl HttpClient {
 
             let headers = response.headers().clone();
             let Ok(body_bytes) = response.bytes().await else {
-                let msg = format!(
-                    "request failed with status {} (could not read response body)",
-                    status.as_u16()
-                );
-                return Err(if status.is_server_error() {
-                    HonchoError::Server {
-                        status: status.as_u16(),
-                        message: msg,
-                    }
-                } else {
-                    HonchoError::Client {
-                        status: status.as_u16(),
-                        message: msg,
-                    }
-                });
+                return Err(body_read_error(status));
             };
             let api_error = error::from_response(status, &headers, &body_bytes, Utc::now());
 
-            let is_retryable =
-                is_idempotent(&method) && matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
+            let is_retryable = is_idempotent(&method) && is_retryable_status(status.as_u16());
 
             if is_retryable && attempt < self.inner.max_retries {
                 let retry_after = headers
                     .get("retry-after")
                     .and_then(|v| error::parse_retry_after(v, Utc::now()));
-                let delay = retry_after.unwrap_or_else(|| jittered_delay(attempt));
+                let delay = match retry_after {
+                    Some(d) if d > MAX_RETRY_AFTER => return Err(api_error),
+                    Some(d) => d,
+                    None => jittered_delay(attempt),
+                };
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
@@ -453,6 +485,18 @@ impl HttpClient {
         }
     }
 
+    /// Execute a streaming HTTP request (e.g. SSE chat) and return the raw
+    /// [`reqwest::Response`].
+    ///
+    /// Unlike [`request`](Self::request), this method does **not** retry on
+    /// transient errors. Streaming responses are non-idempotent and
+    /// unbuffered: retrying would discard any partial data already consumed
+    /// by the caller and could produce duplicate side effects on the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`HonchoError`] variant when the request fails due to a
+    /// timeout, connection error, or non-success status code.
     pub(crate) async fn request_streaming(
         &self,
         method: Method,
@@ -470,11 +514,14 @@ impl HttpClient {
             .chain(query.iter().copied())
             .collect();
 
+        let mut headers = self.inner.default_headers.clone();
+        headers.remove(ACCEPT);
+
         let mut req_builder = self
             .inner
             .client
             .request(method, url)
-            .headers(self.inner.default_headers.clone())
+            .headers(headers)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .query(&merged_query)
             .timeout(self.inner.timeout);
@@ -485,19 +532,7 @@ impl HttpClient {
 
         let response = match req_builder.send().await {
             Ok(r) => r,
-            Err(e) => {
-                return Err(if e.is_timeout() {
-                    HonchoError::Timeout {
-                        message: e.to_string(),
-                    }
-                } else if e.is_connect() || e.is_request() {
-                    HonchoError::Connection {
-                        message: e.to_string(),
-                    }
-                } else {
-                    HonchoError::Transport(e)
-                });
-            }
+            Err(e) => return Err(map_send_error(e)),
         };
 
         let status = response.status();
@@ -507,7 +542,9 @@ impl HttpClient {
         }
 
         let headers = response.headers().clone();
-        let body_bytes = response.bytes().await.unwrap_or_default();
+        let Ok(body_bytes) = response.bytes().await else {
+            return Err(body_read_error(status));
+        };
         Err(error::from_response(
             status,
             &headers,
@@ -1485,5 +1522,163 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    // ── Multi-value headers ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn multi_value_default_headers_preserved() {
+        let server = MockServer::start().await;
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            reqwest::header::HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("val1"),
+        );
+        headers.append(
+            reqwest::header::HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("val2"),
+        );
+
+        let client = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .default_headers(headers)
+                .build(),
+        )
+        .unwrap();
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(peer_json()))
+            .mount(&server)
+            .await;
+
+        let _: Peer = client.get("/v3/test", &[]).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let custom_values: Vec<&str> = requests[0]
+            .headers
+            .get_all("x-custom")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert_eq!(
+            custom_values.len(),
+            2,
+            "both header values should reach the wire"
+        );
+        assert!(custom_values.contains(&"val1"));
+        assert!(custom_values.contains(&"val2"));
+    }
+
+    // ── Large retry-after ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn large_retry_after_returns_error_without_sleeping() {
+        let server = MockServer::start().await;
+        let client = make_client(&server);
+
+        // 86400s = 24h — must NOT cause the client to sleep that long.
+        // MAX_RETRY_AFTER is 60s, so the client should bail immediately.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "86400"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), client.get::<Peer>("/v3/test", &[])).await;
+
+        assert!(
+            outcome.is_ok(),
+            "request should complete without sleeping 24h"
+        );
+        let err = outcome.unwrap().unwrap_err();
+        assert!(
+            matches!(err, HonchoError::RateLimit { .. }),
+            "expected RateLimit, got {err:?}"
+        );
+    }
+
+    // ── Decode fallback only for unit type ──────────────────────────────
+
+    #[tokio::test]
+    async fn decode_failure_for_option_type_not_masked_as_none() {
+        let server = MockServer::start().await;
+        let client = make_client(&server);
+
+        // Valid JSON but incompatible with Peer — old code would have
+        // masked this as Ok(None) via Null fallback; new code returns Decode.
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"unexpected": 1})),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client
+            .get::<Option<Peer>>("/v3/test", &[])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HonchoError::Decode { .. }),
+            "expected Decode error for incompatible JSON, got {err:?}"
+        );
+    }
+
+    // ── Send-error retry classification ─────────────────────────────────
+
+    #[tokio::test]
+    async fn non_network_send_error_is_not_retryable() {
+        // A builder-class send error (https-only client handed an http URL) is
+        // neither a connect nor a timeout error. The old code folded
+        // `is_request()` into the retryable set, which would have retried it;
+        // the fix must classify it non-retryable and map it to `Transport`.
+        let raw = reqwest::Client::builder()
+            .https_only(true)
+            .build()
+            .unwrap()
+            .get("http://example.com")
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(
+            !raw.is_connect() && !raw.is_timeout(),
+            "precondition: error must be neither connect nor timeout"
+        );
+        assert!(
+            !is_send_error_retryable(&raw),
+            "non-network send error must not be retried"
+        );
+        assert!(
+            matches!(map_send_error(raw), HonchoError::Transport(_)),
+            "non-network send error must map to Transport"
+        );
+    }
+
+    // ── Bearer sensitivity ──────────────────────────────────────────────
+
+    #[test]
+    fn bearer_auth_header_marked_sensitive() {
+        // `is_sensitive()` is a reqwest-internal flag, not transmitted over the wire.
+        // Verify on the stored HeaderValue directly.
+        let client = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url("http://localhost:0")
+                .api_key("secret-key")
+                .build(),
+        )
+        .unwrap();
+
+        let auth = client
+            .inner
+            .default_headers
+            .get("authorization")
+            .expect("authorization header should be set");
+        assert!(
+            auth.is_sensitive(),
+            "authorization header must be marked sensitive"
+        );
     }
 }
