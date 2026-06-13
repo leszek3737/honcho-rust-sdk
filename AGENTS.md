@@ -62,7 +62,7 @@ Integration tests use `HONCHO_API_URL` (default `http://localhost:8000`) and `HO
 
 ## Gotchas
 
-- **Blocking API panics if called inside an async runtime** (`src/blocking/runtime.rs:19`). Users must use the async `Honcho` client instead.
+- **Blocking API returns `HonchoError::Configuration` if called inside an async runtime** (`src/blocking/runtime.rs`). Use the async `Honcho` client instead. Streaming-chat iterators (`ChatStreamIterator::next`) and `BlockingIter::try_next` also return `Err(Configuration)` rather than panicking when driven from an async context.
 - **`Page::next_page()` returns `Result<Option<Page<T>>>`** — the `?` is required. `into_stream()` auto-fetches pages.
 - **`SessionContextOptions::validate()?`** must be called after `.build()` when `peer_perspective` or `peer_target` is set.
 - **`DialecticStream::final_response()`** returns `FinalResponse` struct — access text via `.content`, not directly.

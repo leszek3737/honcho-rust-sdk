@@ -3,6 +3,7 @@
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::panic,
     clippy::needless_pass_by_value,
     clippy::uninlined_format_args,
     clippy::manual_range_contains,
@@ -145,7 +146,13 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    std::thread::scope(|s| s.spawn(f).join().unwrap())
+    // resume_unwind preserves the worker thread's original panic payload/message
+    // instead of swallowing it inside a generic join failure.
+    std::thread::scope(|s| {
+        s.spawn(f)
+            .join()
+            .unwrap_or_else(|p| std::panic::resume_unwind(p))
+    })
 }
 
 // ─── Session: context ────────────────────────────────────────────────
@@ -677,6 +684,7 @@ async fn blocking_client_set_configuration() {
     Mock::given(method("PUT"))
         .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ws_json_with_config()))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -755,6 +763,7 @@ async fn blocking_client_schedule_dream() {
             "dream_type": "omni"
         })))
         .respond_with(ResponseTemplate::new(200))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -908,6 +917,7 @@ async fn blocking_client_delete_workspace() {
     Mock::given(method("DELETE"))
         .and(path("/v3/workspaces/old-ws"))
         .respond_with(ResponseTemplate::new(204))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -952,6 +962,7 @@ async fn blocking_client_set_metadata() {
     Mock::given(method("PUT"))
         .and(path("/v3/workspaces/ws1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ws_json()))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -978,6 +989,7 @@ async fn blocking_client_refresh() {
             "created_at": "2025-01-15T10:30:00Z"
         })))
         .up_to_n_times(3)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -1222,4 +1234,429 @@ async fn blocking_peer_update() {
         meta.insert("role".into(), serde_json::json!("admin"));
         peer.update(meta).unwrap();
     });
+}
+
+// ─── upload_file_streamed from a plain sync thread ───────────────────
+//
+// Guards session.rs: `upload_file_streamed` spawn_blocking-outside-runtime
+// panic fix. The reader thread now uses std::thread::spawn +
+// handle.block_on(async {...}), so constructing + sending from a plain OS
+// thread (no tokio runtime) must not panic and must deliver the reader
+// bytes in the multipart body.
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_upload_file_streamed_from_sync_thread_succeeds() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    let payload = b"hello streamed world from a sync thread".to_vec();
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1/messages/upload"))
+        .and(wiremock::matchers::body_string_contains(
+            "hello streamed world from a sync thread",
+        ))
+        .and(wiremock::matchers::body_string_contains("peer_id"))
+        .and(wiremock::matchers::body_string_contains("alice"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vec![msg_json("m_up1")]))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let payload_for_thread = payload.clone();
+    let msgs = blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        let cursor = std::io::Cursor::new(payload_for_thread);
+        session
+            .upload_file_streamed("doc.txt", cursor, "text/plain")
+            .peer("alice")
+            .send()
+            .unwrap()
+    });
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].id(), "m_up1");
+}
+
+// ─── truncated upload surfaces Err(Io) ──────────────────────────────
+//
+// Guards ErrorAwareReader::poll_read EOF=no-growth fix: a Read that yields
+// bytes then errors must propagate the io::Error through read_to_end, never
+// Ok.
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_upload_file_streamed_truncated_reader_surfaces_io_err() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    // The mock is never matched because the body stream errors before the
+    // request completes, but mounting it ensures wiremock does not return a
+    // spurious 404 that would mask the Io error.
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/sessions/sess1/messages/upload"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vec![msg_json("m_x")]))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let err = blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        // Reader: yields 4 bytes of data, then returns a permanent io::Error.
+        let reader = FailingReader::new(b"data".to_vec(), 4);
+        session
+            .upload_file_streamed("doc.txt", reader, "text/plain")
+            .peer("alice")
+            .send()
+            .unwrap_err()
+    });
+    assert!(
+        matches!(err, honcho_ai::error::HonchoError::Io(_)),
+        "expected HonchoError::Io, got {err:?}"
+    );
+}
+
+// ─── no reader-thread leak on early send() failure ──────────────────
+//
+// Guards session.rs join-on-all-exit-paths: when block_on fails immediately
+// (send() called from inside an async runtime), the reader thread is still
+// running. send() must join() it before returning — otherwise the thread
+// keeps reading the user's reader in the background.
+//
+// Assertion design: a slow reader (100 ms per byte) carries an AtomicBool
+// "dropped" flag set in Drop. If join() is called, send() blocks until the
+// thread naturally exits and the reader is dropped → flag is `true` the
+// instant send() returns. If join() is skipped, send() returns in <1 ms
+// while the thread is still sleeping in read() → flag is `false`.
+// A secondary counter-stability check catches lingering threads even if the
+// Drop race is lost.
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_upload_file_streamed_joins_reader_thread_on_early_error() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+
+    let uri = server.uri();
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let read_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let dropped_for_thread = dropped.clone();
+    let counter_for_thread = read_counter.clone();
+    let dropped_after = dropped.clone();
+    let counter_after = read_counter.clone();
+
+    let (result, elapsed, dropped_at_return, counter_at_return) = std::thread::scope(|s| {
+        s.spawn(move || -> (honcho_ai::error::Result<Vec<honcho_ai::Message>>, std::time::Duration, bool, usize) {
+            // Plain OS thread, no tokio runtime: Honcho/session/upload setup works.
+            let client = Honcho::new(&uri, "ws1").unwrap();
+            let session = client.session("sess1", None, None, None).unwrap();
+            let reader = SlowFiniteReader::new(
+                counter_for_thread,
+                dropped_for_thread,
+                20,
+                std::time::Duration::from_millis(100),
+            );
+            let builder = session
+                .upload_file_streamed("doc.txt", reader, "text/plain")
+                .peer("alice");
+
+            // Enter an async runtime context: block_on(self.inner.send())
+            // inside send() detects the ambient runtime and returns
+            // Err(Configuration) immediately. The reader thread is still
+            // running at this point.
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let start = std::time::Instant::now();
+            let result = rt.block_on(async { builder.send() });
+            let elapsed = start.elapsed();
+            let dropped_at_return = dropped.load(std::sync::atomic::Ordering::SeqCst);
+            let counter_at_return = read_counter.load(std::sync::atomic::Ordering::SeqCst);
+            (result, elapsed, dropped_at_return, counter_at_return)
+        })
+        .join()
+        .unwrap_or_else(|p| std::panic::resume_unwind(p))
+    });
+
+    // send() must return Configuration error (runtime guard fired).
+    assert!(
+        matches!(result, Err(ref e) if matches!(e, honcho_ai::error::HonchoError::Configuration(_))),
+        "expected Configuration error, got {result:?}"
+    );
+
+    // join() must have blocked for the reader thread to finish. With the
+    // 100 ms per-byte sleep, join() blocks ≥80 ms. Without join(), send()
+    // returns in <5 ms and the flag is still false.
+    assert!(
+        elapsed > std::time::Duration::from_millis(80),
+        "join() should have blocked until the reader thread finished; elapsed={elapsed:?}"
+    );
+
+    // The reader's Drop flag must be set — proving the thread fully exited
+    // (and dropped the reader) BEFORE send() returned.
+    assert!(
+        dropped_at_return,
+        "reader Drop flag not set at send() return — join() was skipped"
+    );
+
+    // Secondary: counter must be stable after send() returns.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let counter_after_wait = counter_after.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        counter_after_wait, counter_at_return,
+        "reader thread still incrementing after send() returned — join() leaked"
+    );
+
+    // And the Drop flag must still be set.
+    assert!(
+        dropped_after.load(std::sync::atomic::Ordering::SeqCst),
+        "reader Drop flag cleared — impossible"
+    );
+}
+
+// ─── ChatStreamIterator::next from async returns Err, not panic ──────
+//
+// Guards peer.rs: ChatStreamIterator::next now maps block_on config-
+// rejection to Some(Err(Configuration(_))) and is fused via is_complete().
+// Previously (iter.rs:50) this panicked.
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_chat_stream_iterator_next_from_async_returns_configuration_err() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_peer(&server).await;
+
+    let sse_body = format!(
+        "{}{}",
+        sse_chunk(r#"{"delta":{"content":"hello"}}"#),
+        sse_chunk(r#"{"done":true}"#),
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces/ws1/peers/alice/chat"))
+        .and(body_json(
+            serde_json::json!({"query": "hi", "stream": true}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+
+    // Build the iterator from a sync thread (no runtime → send() works).
+    let mut iter = blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let peer = client.peer("alice", None, None).unwrap();
+        peer.chat_stream("hi").send().unwrap()
+    });
+
+    // We are now inside the #[tokio::test] runtime. Calling next() must NOT
+    // panic — it must yield Some(Err(Configuration(_))).
+    let first = iter.next();
+    let first_err = first.expect("expected Some(Err(Configuration)), got None");
+    assert!(
+        matches!(first_err, Err(honcho_ai::error::HonchoError::Configuration(ref msg))
+            if msg.contains("cannot be used from inside an async runtime")),
+        "expected Configuration error, got {first_err:?}"
+    );
+
+    // Fuse-after-error: the config-rejection must NOT leave the iterator
+    // drivable. A subsequent next() from the SAME async context returns None
+    // — no infinite spin that would hang `for`/`collect`/`Iterator::flatten`.
+    assert!(
+        iter.next().is_none(),
+        "fuse-after-error: expected None immediately after the Configuration error"
+    );
+
+    // The fuse must be sticky: even from a valid (non-async) thread the
+    // iterator stays exhausted — it does not "un-fuse" and re-poll the
+    // stream. Before the fix this drain loop spun forever yielding
+    // Some(Err(..)); now it terminates immediately.
+    std::thread::scope(|s| {
+        s.spawn(|| while iter.next().is_some() {})
+            .join()
+            .unwrap_or_else(|p| std::panic::resume_unwind(p));
+    });
+
+    // Fuse: iterator remains exhausted.
+    assert!(
+        iter.next().is_none(),
+        "fuse: expected None after completion"
+    );
+    assert!(iter.next().is_none(), "fuse: expected None on repeat call");
+}
+
+// ─── reader-thread panic surfaces even when send() also fails ────────
+//
+// Guards session.rs send(): a panic in the reader thread is surfaced
+// unconditionally and takes precedence over the send result. A panicking
+// reader drops the pipe write half, truncating the body so the (unmounted)
+// upload endpoint 404s and `send()` itself returns Err — but the panic is
+// the root cause and must win, never be swallowed behind the server error.
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_upload_file_streamed_reader_panic_wins_over_send_error() {
+    let server = MockServer::start().await;
+    mount_ensure_ws(&server).await;
+    mount_create_session(&server).await;
+    // Intentionally do NOT mount the upload endpoint: the truncated request
+    // 404s, so `send()` returns a server error — yet the reader panic must
+    // be the error surfaced.
+
+    let uri = server.uri();
+    let err = blocking(move || {
+        let client = Honcho::new(&uri, "ws1").unwrap();
+        let session = client.session("sess1", None, None, None).unwrap();
+        let reader = PanickingReader::new(8);
+        // The reader thread's unwind prints to stderr via the default panic
+        // hook; that's expected noise for this test. The payload is captured
+        // by JoinHandle::join and surfaced as the returned error.
+        session
+            .upload_file_streamed("doc.txt", reader, "text/plain")
+            .peer("alice")
+            .send()
+            .unwrap_err()
+    });
+    match err {
+        honcho_ai::error::HonchoError::Io(e) => assert!(
+            e.to_string().contains("synthetic reader panic"),
+            "expected the reader panic message to be surfaced, got: {e}"
+        ),
+        other => panic!("expected HonchoError::Io carrying the panic message, got {other:?}"),
+    }
+}
+
+// ─── Test helper readers ─────────────────────────────────────────────
+
+/// Reader that yields `ok_bytes` bytes of filler, then **panics** on the next
+/// read with a `&'static str` payload (so `JoinHandle::join` returns it).
+struct PanickingReader {
+    remaining_ok: usize,
+}
+
+impl PanickingReader {
+    fn new(ok_bytes: usize) -> Self {
+        Self {
+            remaining_ok: ok_bytes,
+        }
+    }
+}
+
+impl std::io::Read for PanickingReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        assert!(self.remaining_ok != 0, "synthetic reader panic");
+        let n = buf.len().min(self.remaining_ok);
+        buf[..n].fill(b'x');
+        self.remaining_ok -= n;
+        Ok(n)
+    }
+}
+
+/// Reader that yields the first `fail_at` bytes of `data`, then returns a
+/// permanent `io::Error` on the next read.
+struct FailingReader {
+    data: Vec<u8>,
+    pos: usize,
+    fail_at: usize,
+    errored: bool,
+}
+
+impl FailingReader {
+    fn new(data: Vec<u8>, fail_at: usize) -> Self {
+        Self {
+            data,
+            pos: 0,
+            fail_at,
+            errored: false,
+        }
+    }
+}
+
+impl std::io::Read for FailingReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.fail_at {
+            if self.errored {
+                return Ok(0);
+            }
+            self.errored = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "synthetic truncated-read error",
+            ));
+        }
+        let remaining = self.fail_at - self.pos;
+        let to_copy = buf.len().min(remaining);
+        buf[..to_copy].copy_from_slice(&self.data[self.pos..self.pos + to_copy]);
+        self.pos += to_copy;
+        Ok(to_copy)
+    }
+}
+
+/// Reader that yields one byte per call, sleeping `delay` between reads,
+/// up to `total_bytes`. Increments `counter` on every `read()` call.
+/// Sets `dropped` to `true` on Drop so callers can verify the reader thread
+/// has fully exited.
+struct SlowFiniteReader {
+    counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    remaining: usize,
+    delay: std::time::Duration,
+}
+
+impl SlowFiniteReader {
+    fn new(
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        total_bytes: usize,
+        delay: std::time::Duration,
+    ) -> Self {
+        Self {
+            counter,
+            dropped,
+            remaining: total_bytes,
+            delay,
+        }
+    }
+}
+
+impl std::io::Read for SlowFiniteReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let _ = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.remaining == 0 {
+            return Ok(0);
+        }
+        std::thread::sleep(self.delay);
+        self.remaining -= 1;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = b'x';
+        Ok(1)
+    }
+}
+
+impl Drop for SlowFiniteReader {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// SSE chunk formatter matching the dialectic stream wire format.
+fn sse_chunk(json: &str) -> String {
+    format!("data: {json}\n\n")
 }
