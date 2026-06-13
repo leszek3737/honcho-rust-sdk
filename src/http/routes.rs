@@ -26,19 +26,30 @@ fn encode(s: &str) -> String {
 
 /// Validate that an ID is not empty, whitespace-only, or a dot-segment.
 ///
-/// Dot-segments (`.` / `..` / `%2e` variants) are rejected because URL parsers
-/// normalize them away, enabling path-traversal attacks.
+/// Dot-segments (`.` / `..` and their `%2e` spellings) are rejected because
+/// URL parsers normalize them away, enabling path-traversal attacks.
+///
+/// Note: the *primary* defense against traversal is [`encode`], which
+/// percent-encodes `%` (and `/`), so a percent-encoded dot like `%2e` becomes
+/// the literal `%252e` and can never collapse to `..`. The literal `.` / `..`
+/// rejection here is essential because `.` is an unreserved character that
+/// [`encode`] leaves untouched. The `%2e` checks below are belt-and-suspenders
+/// defense-in-depth, kept consistent across all spellings.
 fn validate_id(id: &str, name: &str) -> Result<()> {
     if id.trim().is_empty() {
         return Err(HonchoError::Validation(format!(
             "{name} must not be empty or whitespace-only"
         )));
     }
-    // Reject dot-segments and their percent-encoded variants.
-    // WHATWG URL parsers collapse "." and ".." (and %2e/%2E) during normalization,
-    // which would let `workspace("..")` escape its path segment.
+    // Reject dot-segments and every percent-encoded / mixed spelling.
+    // WHATWG URL parsers collapse "." and ".." (and %2e/%2E, including mixed
+    // forms like ".%2e" / "%2e.") during normalization, which would let
+    // `workspace("..")` escape its path segment.
     let lower = id.to_ascii_lowercase();
-    if lower == "." || lower == ".." || lower == "%2e" || lower == "%2e%2e" {
+    if matches!(
+        lower.as_str(),
+        "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."
+    ) {
         return Err(HonchoError::Validation(format!(
             "{name} must not be a dot-segment ('.' or '..')"
         )));
@@ -686,6 +697,16 @@ mod tests {
             workspace("%2E").unwrap_err(),
             HonchoError::Validation(_)
         ));
+    }
+
+    #[test]
+    fn test_workspace_mixed_encoded_dot_rejected() {
+        for id in [".%2e", "%2e.", ".%2E", "%2E."] {
+            assert!(
+                matches!(workspace(id).unwrap_err(), HonchoError::Validation(_)),
+                "mixed dot-segment {id:?} should be rejected"
+            );
+        }
     }
 
     #[test]

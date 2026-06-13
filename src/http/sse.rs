@@ -46,12 +46,7 @@ impl SseParser {
         // single unterminated line (plus any undecoded trailing bytes). Only
         // that retained leftover is bounded — a large chunk made of many
         // complete lines drains away and is fine.
-        if self
-            .buffer
-            .len()
-            .saturating_add(self.pending_bytes.len())
-            > MAX_SSE_LINE_BYTES
-        {
+        if self.buffer.len().saturating_add(self.pending_bytes.len()) > MAX_SSE_LINE_BYTES {
             return Err(crate::error::HonchoError::Connection {
                 message: format!("SSE line exceeded maximum length of {MAX_SSE_LINE_BYTES} bytes"),
             });
@@ -264,10 +259,17 @@ pub fn parse_sse_stream(
                     }
                 }
                 Err(e) => {
-                    // Flush buffered content before propagating the error
-                    if let Ok(items) = parser.finalize() {
-                        for content in items {
-                            yield content;
+                    // Flush buffered content before propagating the error.
+                    // If finalize() itself fails its DoS guard, surface that
+                    // error instead of swallowing it (mirrors the feed()? path).
+                    match parser.finalize() {
+                        Ok(items) => {
+                            for content in items {
+                                yield content;
+                            }
+                        }
+                        Err(fin_err) => {
+                            yield Err(fin_err)?;
                         }
                     }
                     yield Err(crate::error::HonchoError::Connection {
@@ -533,17 +535,20 @@ mod tests {
     fn feed_accepts_large_chunk_of_complete_lines() {
         // A chunk far larger than MAX_SSE_LINE_BYTES is fine as long as every
         // line is terminated — completed lines drain away and never accumulate.
+        // Use few, large lines (rather than many tiny ones) so the test stays
+        // fast despite pop_line's O(n) drain per line.
         let mut p = SseParser::new();
-        let mut chunk = Vec::new();
-        let mut expected = Vec::new();
-        for i in 0..200_000 {
-            let line = format!("data: {{\"delta\":{{\"content\":\"{i}\"}}}}\n");
-            chunk.extend_from_slice(line.as_bytes());
-            expected.push(i.to_string());
-        }
+        let content = "x".repeat(2048);
+        let line = format!("data: {{\"delta\":{{\"content\":\"{content}\"}}}}\n");
+        let line_count = (MAX_SSE_LINE_BYTES / line.len()) + 2;
+        let chunk = line.repeat(line_count);
         assert!(chunk.len() > MAX_SSE_LINE_BYTES);
-        let r = p.feed(&chunk).expect("large chunk of complete lines must be accepted");
-        assert_eq!(r, expected);
+
+        let r = p
+            .feed(chunk.as_bytes())
+            .expect("large chunk of complete lines must be accepted");
+        assert_eq!(r.len(), line_count);
+        assert!(r.iter().all(|s| s == &content));
     }
 
     #[test]
