@@ -244,7 +244,11 @@ impl Honcho {
         .map(drop)
     }
 
-    /// Eagerly ensure the workspace exists.
+    /// Bypasses the workspace-ensure cache and always issues a
+    /// `POST /v3/workspaces`, even if a prior ensure already succeeded.
+    ///
+    /// Use this to recover after a server-side workspace deletion. Repeated
+    /// calls each hit the server.
     ///
     /// # Examples
     ///
@@ -300,6 +304,11 @@ impl Honcho {
     }
 
     /// Set workspace metadata on the server.
+    ///
+    /// Unlike the read operations (e.g. [`get_metadata`](Self::get_metadata)),
+    /// which lazily ensure the workspace exists, this write assumes the
+    /// workspace already exists and fails with a 404 if it was deleted
+    /// server-side.
     pub async fn set_metadata(&self, metadata: HashMap<String, Value>) -> Result<()> {
         let body = crate::types::workspace::WorkspaceMetadataSet { metadata };
         let _: Workspace = self
@@ -341,6 +350,11 @@ impl Honcho {
     /// };
     /// client.set_configuration(&config).await?;
     /// ```
+    ///
+    /// Unlike the read operations (e.g.
+    /// [`get_configuration`](Self::get_configuration)), which lazily ensure the
+    /// workspace exists, this write assumes the workspace already exists and
+    /// fails with a 404 if it was deleted server-side.
     pub async fn set_configuration(&self, config: &WorkspaceConfiguration) -> Result<()> {
         let body = crate::types::workspace::WorkspaceConfigurationSet {
             configuration: serde_json::to_value(config)
@@ -384,6 +398,11 @@ impl Honcho {
     /// Prefer [`set_configuration`](Self::set_configuration) for typed access.
     /// Use this when you need to send fields not yet represented in
     /// [`WorkspaceConfiguration`].
+    ///
+    /// Unlike the read operations (e.g.
+    /// [`get_configuration_raw`](Self::get_configuration_raw)), which lazily
+    /// ensure the workspace exists, this write assumes the workspace already
+    /// exists and fails with a 404 if it was deleted server-side.
     pub async fn set_configuration_raw(&self, configuration: HashMap<String, Value>) -> Result<()> {
         let body = crate::types::workspace::WorkspaceConfigurationSet {
             configuration: serde_json::Value::Object(configuration.into_iter().collect()),
@@ -549,14 +568,11 @@ impl Honcho {
                 &[],
             )
             .await?;
-        // NOTE: `Message::from_raw` owns a `String` workspace_id, so each
-        // message still allocates one. Removing the per-message allocation would
-        // require changing `from_raw` to accept `Arc<str>` (out of scope here —
-        // owned by message.rs). The internal `Arc<str>` field at least avoids a
-        // standing `String` clone on the client itself.
+        // `Message::from_raw` no longer takes a workspace_id, so there is no
+        // per-message `String` allocation here.
         Ok(responses
             .into_iter()
-            .map(|r| crate::Message::from_raw(self.workspace_id().to_owned(), r))
+            .map(crate::Message::from_raw)
             .collect())
     }
 

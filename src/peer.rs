@@ -738,7 +738,7 @@ impl Peer {
             .await?;
         Ok(responses
             .into_iter()
-            .map(|r| crate::Message::from_raw(self.inner.workspace_id.clone(), r))
+            .map(crate::Message::from_raw)
             .collect())
     }
 

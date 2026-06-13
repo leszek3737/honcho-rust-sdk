@@ -18,8 +18,8 @@ pub enum FileSource {
     Bytes {
         /// File name to send.
         filename: String,
-        /// Raw file data. Cloned by reference-count, not deep-copied, on retry.
-        bytes: bytes::Bytes,
+        /// Raw file data.
+        bytes: Vec<u8>,
         /// MIME content type.
         content_type: String,
     },
@@ -67,8 +67,7 @@ impl FileSource {
     /// Create a `Bytes` variant from explicit parts.
     ///
     /// `data` accepts anything convertible into `Vec<u8>` (e.g. `Vec<u8>`,
-    /// `&[u8]`, `&str`); it is stored as [`bytes::Bytes`] internally so that
-    /// upload retries clone by reference-count rather than deep-copying.
+    /// `&[u8]`, `&str`) and is stored as a `Vec<u8>`.
     ///
     /// The content type is validated when the upload is sent (during multipart
     /// form construction), not here, to keep this constructor infallible.
@@ -82,7 +81,7 @@ impl FileSource {
     ) -> Self {
         Self::Bytes {
             filename: filename.into(),
-            bytes: bytes::Bytes::from(data.into()),
+            bytes: data.into(),
             content_type: content_type.into(),
         }
     }

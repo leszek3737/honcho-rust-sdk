@@ -88,14 +88,6 @@ pub enum PeerSpec {
     WithConfig(String, SessionPeerConfig),
 }
 
-impl PeerSpec {
-    fn id(&self) -> &str {
-        match self {
-            Self::Id(id) | Self::WithConfig(id, _) => id,
-        }
-    }
-}
-
 impl From<&str> for PeerSpec {
     fn from(s: &str) -> Self {
         Self::Id(s.to_owned())
@@ -344,7 +336,11 @@ impl UploadFileBuilder<'_> {
                 content_type,
             } => Resolved::Bytes {
                 filename,
-                bytes,
+                // `FileSource::Bytes` carries a `Vec<u8>` (kept non-breaking in the
+                // public API). Convert it to `bytes::Bytes` exactly once here, before
+                // the retry closure is built, so each retry clones a cheap refcount
+                // handle (`Bytes::clone`) instead of copying the whole buffer.
+                bytes: bytes::Bytes::from(bytes),
                 content_type,
             },
             FileSource::Stream {
@@ -417,7 +413,7 @@ impl UploadFileBuilder<'_> {
 
         Ok(responses
             .into_iter()
-            .map(|r| crate::Message::from_raw(self.session.inner.workspace_id.to_string(), r))
+            .map(crate::Message::from_raw)
             .collect())
     }
 }
@@ -772,6 +768,11 @@ impl Session {
 
     /// List peers in this session.
     ///
+    /// This call is **all-or-nothing**: it walks every page and deserializes each
+    /// peer. If any single peer fails to deserialize (`Peer::from_parts` errors),
+    /// the whole call returns that error and the peers already accumulated from
+    /// earlier pages are discarded — partial results are never returned.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -914,10 +915,8 @@ impl Session {
                     Err(e) if all.is_empty() => return Err(e),
                     Err(e) => {
                         let sent = all.len();
-                        let partial: Vec<Message> = all
-                            .into_iter()
-                            .map(|r| Message::from_raw(self.inner.workspace_id.to_string(), r))
-                            .collect();
+                        let partial: Vec<Message> =
+                            all.into_iter().map(Message::from_raw).collect();
                         return Err(HonchoError::PartialFailure {
                             messages: partial,
                             sent,
@@ -929,10 +928,7 @@ impl Session {
             all
         };
 
-        Ok(responses
-            .into_iter()
-            .map(|r| Message::from_raw(self.inner.workspace_id.to_string(), r))
-            .collect())
+        Ok(responses.into_iter().map(Message::from_raw).collect())
     }
 
     /// List messages in this session with default pagination (no filters, page 1, size 50).
@@ -993,10 +989,7 @@ impl Session {
                 reverse,
             )
             .await?;
-        // Cheap `Arc<str>` clone captured once; each element pays only the
-        // `String` allocation that `Message::from_raw` requires.
-        let ws = self.inner.workspace_id.clone();
-        Ok(result.map(move |r| Message::from_raw(ws.to_string(), r)))
+        Ok(result.map(Message::from_raw))
     }
 
     // ── F7.3: File upload ───────────────────────────────────────────────
@@ -1140,7 +1133,7 @@ impl Session {
     pub async fn get_message(&self, id: &str) -> Result<Message> {
         let route = routes::message(&self.inner.workspace_id, &self.inner.id, id)?;
         let resp: MessageResponse = self.inner.http.get(&route, &[]).await?;
-        Ok(Message::from_raw(self.inner.workspace_id.to_string(), resp))
+        Ok(Message::from_raw(resp))
     }
 
     /// Update a message's metadata.
@@ -1164,7 +1157,7 @@ impl Session {
         let route = routes::message(&self.inner.workspace_id, &self.inner.id, id)?;
         let body = crate::types::message::MessageMetadataSet { metadata };
         let resp: MessageResponse = self.inner.http.put(&route, Some(&body), &[]).await?;
-        Ok(Message::from_raw(self.inner.workspace_id.to_string(), resp))
+        Ok(Message::from_raw(resp))
     }
 
     // ── F6.6: Context ───────────────────────────────────────────────────
@@ -1321,10 +1314,7 @@ impl Session {
         let route = routes::session_search(&self.inner.workspace_id, &self.inner.id)?;
         let responses: Vec<MessageResponse> =
             self.inner.http.post(&route, Some(&options), &[]).await?;
-        Ok(responses
-            .into_iter()
-            .map(|r| Message::from_raw(self.inner.workspace_id.to_string(), r))
-            .collect())
+        Ok(responses.into_iter().map(Message::from_raw).collect())
     }
 
     /// Get a peer's representation scoped to this session.
@@ -1689,34 +1679,39 @@ async fn fetch_session_context(
 fn normalize_peers(
     specs: impl IntoIterator<Item = impl Into<PeerSpec>>,
 ) -> Result<serde_json::Value> {
+    use serde_json::map::Entry;
+
     let mut map = serde_json::Map::new();
     for s in specs {
-        let spec = s.into();
-        let val = match &spec {
-            PeerSpec::Id(_) => serde_json::to_value(SessionPeerConfig {
-                observe_me: None,
-                observe_others: None,
-            })
-            .map_err(|e| {
-                HonchoError::Configuration(format!(
-                    "failed to serialize peer config for {}: {e}",
-                    spec.id()
-                ))
-            })?,
-            PeerSpec::WithConfig(_, cfg) => serde_json::to_value(cfg).map_err(|e| {
-                HonchoError::Configuration(format!(
-                    "failed to serialize peer config for {}: {e}",
-                    spec.id()
-                ))
-            })?,
+        // Destructure by value so the id is owned (no extra clone) and the config
+        // is taken directly instead of being re-derived per match arm.
+        let (id, cfg) = match s.into() {
+            PeerSpec::Id(id) => (
+                id,
+                SessionPeerConfig {
+                    observe_me: None,
+                    observe_others: None,
+                },
+            ),
+            PeerSpec::WithConfig(id, cfg) => (id, cfg),
         };
+        let val = serde_json::to_value(&cfg).map_err(|e| {
+            HonchoError::Configuration(format!("failed to serialize peer config for {id}: {e}"))
+        })?;
         // Reject duplicate IDs instead of letting a later entry silently clobber
-        // an earlier one (which a `Map` collect would do).
-        let id = spec.id().to_owned();
-        if map.contains_key(&id) {
-            return Err(HonchoError::Validation(format!("duplicate peer id: {id}")));
+        // an earlier one. The Entry API does a single lookup for both the
+        // duplicate check and the insert.
+        match map.entry(id) {
+            Entry::Occupied(e) => {
+                return Err(HonchoError::Validation(format!(
+                    "duplicate peer id: {}",
+                    e.key()
+                )));
+            }
+            Entry::Vacant(e) => {
+                e.insert(val);
+            }
         }
-        map.insert(id, val);
     }
     Ok(Value::Object(map))
 }

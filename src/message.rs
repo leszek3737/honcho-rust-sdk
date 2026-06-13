@@ -34,20 +34,11 @@ pub struct Message {
 }
 
 impl Message {
-    /// Wraps a raw [`MessageResponse`] together with its workspace context.
+    /// Wraps a raw [`MessageResponse`] into a [`Message`].
     ///
-    /// Workspace identity precedence: the **response is authoritative**. The
-    /// caller-supplied `workspace_id` records the client's expectation only;
-    /// the stored value always comes from `resp.workspace_id`. If the two ever
-    /// disagree, the server's value wins (and the argument is discarded).
-    ///
-    /// The argument is taken by value (`String`, not `&str`) to preserve a
-    /// stable signature for the many internal callers, even though its value is
-    /// discarded in favour of `resp.workspace_id`.
-    pub(crate) fn from_raw(workspace_id: String, resp: MessageResponse) -> Self {
-        // The caller's expectation is intentionally dropped in favour of the
-        // server-provided identity (see precedence note above).
-        drop(workspace_id);
+    /// The workspace identity is taken directly from the server response
+    /// (`resp.workspace_id`), which is authoritative.
+    pub(crate) fn from_raw(resp: MessageResponse) -> Self {
         Self {
             inner: Arc::new(MessageInner {
                 workspace_id: resp.workspace_id,
@@ -178,7 +169,7 @@ mod tests {
     #[test]
     fn from_raw_maps_fields() {
         let resp = fake_response();
-        let msg = Message::from_raw("ws_1".to_owned(), resp);
+        let msg = Message::from_raw(resp);
         assert_eq!(msg.id(), "msg_1");
         assert_eq!(msg.content(), "hello world");
         assert_eq!(msg.peer_id(), "peer_a");
@@ -189,13 +180,11 @@ mod tests {
     }
 
     #[test]
-    fn from_raw_stores_response_workspace_id_over_caller_arg() {
-        // The response is authoritative for workspace identity: when the
-        // caller-supplied argument disagrees with `resp.workspace_id`, the
-        // stored value must come from the response.
+    fn from_raw_stores_response_workspace_id() {
+        // The workspace identity is taken from the server response.
         let mut resp = fake_response();
         resp.workspace_id = "ws_from_server".to_owned();
-        let msg = Message::from_raw("ws_caller_expectation".to_owned(), resp);
+        let msg = Message::from_raw(resp);
         assert_eq!(msg.workspace_id(), "ws_from_server");
     }
 
@@ -203,7 +192,7 @@ mod tests {
     fn debug_truncates_long_content() {
         let mut resp = fake_response();
         resp.content = "a".repeat(80);
-        let msg = Message::from_raw("ws_1".to_owned(), resp);
+        let msg = Message::from_raw(resp);
         let dbg = format!("{msg:?}");
         assert!(dbg.contains("aaa..."));
         assert!(!dbg.contains(&"a".repeat(80)));
@@ -212,7 +201,7 @@ mod tests {
     #[test]
     fn debug_short_content_not_truncated() {
         let resp = fake_response();
-        let msg = Message::from_raw("ws_1".to_owned(), resp);
+        let msg = Message::from_raw(resp);
         let dbg = format!("{msg:?}");
         assert!(dbg.contains("hello world"));
         assert!(!dbg.contains("..."));
@@ -222,7 +211,7 @@ mod tests {
     fn display_returns_full_content() {
         let mut resp = fake_response();
         resp.content = "a".repeat(80);
-        let msg = Message::from_raw("ws_1".to_owned(), resp);
+        let msg = Message::from_raw(resp);
         assert_eq!(format!("{msg}"), "a".repeat(80));
     }
 
@@ -230,7 +219,7 @@ mod tests {
     fn debug_truncation_multibyte_utf8() {
         let mut resp = fake_response();
         resp.content = "\u{4e00}".repeat(60);
-        let msg = Message::from_raw("ws_1".to_owned(), resp);
+        let msg = Message::from_raw(resp);
         let dbg = format!("{msg:?}");
         assert!(dbg.contains("..."));
     }

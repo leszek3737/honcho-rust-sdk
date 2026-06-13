@@ -464,7 +464,6 @@ impl ConclusionScope {
     /// # Errors
     ///
     /// Returns [`HonchoError::Server`] if the server rejects the request.
-    #[must_use]
     pub fn list(&self) -> ListConclusionsBuilder {
         ListConclusionsBuilder {
             scope: self.clone(),
@@ -497,7 +496,6 @@ impl ConclusionScope {
     /// Returns [`HonchoError::Validation`] if `query` is empty, `top_k` ∉ [1, 100],
     /// or `distance` ∉ [0.0, 1.0]. Returns [`HonchoError::Server`] on
     /// transport or API errors.
-    #[must_use]
     pub fn query(&self, query: impl Into<String>) -> QueryConclusionsBuilder {
         QueryConclusionsBuilder {
             scope: self.clone(),
@@ -662,6 +660,7 @@ impl ConclusionRepresentationBuilder {
 }
 
 /// Builder for paginated conclusion listing, obtained via [`ConclusionScope::list()`].
+#[must_use]
 pub struct ListConclusionsBuilder {
     scope: ConclusionScope,
     page: u64,
@@ -680,7 +679,6 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().page(2);
     /// # }
     /// ```
-    #[must_use]
     pub fn page(mut self, page: u32) -> Self {
         self.page = u64::from(page);
         self
@@ -695,7 +693,6 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().size(25);
     /// # }
     /// ```
-    #[must_use]
     pub fn size(mut self, size: u32) -> Self {
         self.size = u64::from(size);
         self
@@ -710,7 +707,6 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().session("sess-42");
     /// # }
     /// ```
-    #[must_use]
     pub fn session(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
@@ -725,7 +721,6 @@ impl ListConclusionsBuilder {
     /// let _builder = scope.list().reverse(true);
     /// # }
     /// ```
-    #[must_use]
     pub fn reverse(mut self, reverse: bool) -> Self {
         self.reverse = reverse;
         self
@@ -770,6 +765,7 @@ impl ListConclusionsBuilder {
 }
 
 /// Builder for semantic conclusion queries, obtained via [`ConclusionScope::query()`].
+#[must_use]
 pub struct QueryConclusionsBuilder {
     scope: ConclusionScope,
     query: String,
@@ -787,7 +783,6 @@ impl QueryConclusionsBuilder {
     /// let _builder = scope.query("interests").top_k(5);
     /// # }
     /// ```
-    #[must_use]
     pub fn top_k(mut self, top_k: u32) -> Self {
         self.top_k = top_k;
         self
@@ -802,7 +797,6 @@ impl QueryConclusionsBuilder {
     /// let _builder = scope.query("interests").distance(0.7);
     /// # }
     /// ```
-    #[must_use]
     pub fn distance(mut self, distance: f64) -> Self {
         self.distance = Some(distance);
         self
