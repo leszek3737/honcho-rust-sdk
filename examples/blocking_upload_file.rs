@@ -1,11 +1,13 @@
 #![allow(clippy::print_stdout)]
-//! Blocking (synchronous) API with session messages and configuration.
+//! Upload a file to a session with the blocking (synchronous) API.
 //!
-//! Demonstrates the blocking facade for creating peers, sessions,
-//! sending messages, and reading context without async/await.
+//! Mirrors `examples/upload.rs` but without async/await: it ensures the
+//! uploading peer is a session member, then uploads in-memory bytes as a
+//! `text/plain` file and prints how many messages the upload created.
 //!
 //! Run with `cargo run --example blocking_upload_file --features blocking`
 
+use honcho_ai::FileSource;
 use honcho_ai::blocking::Honcho;
 
 fn main() -> honcho_ai::error::Result<()> {
@@ -15,23 +17,14 @@ fn main() -> honcho_ai::error::Result<()> {
     let peer = honcho.peer("user-1").build()?;
     let session = honcho.session("sess-1").build()?;
 
-    session.add_messages(vec![
-        peer.message("Uploading a file synchronously").build()?,
-    ])?;
+    // The uploading peer must be a member of the session before the upload.
+    session.add_peer(peer.id())?;
 
-    if let Some(response) = peer.chat("What files have I uploaded?")? {
-        println!("Response: {response}");
-    }
+    // The array literal converts straight into the `Vec<u8>` the API needs.
+    let source = FileSource::bytes("hello.txt", b"Hello from a file!", "text/plain");
+    let messages = session.upload_file(source).peer(peer.id()).send()?;
 
-    let opts = honcho_ai::types::session::SessionContextOptions::builder()
-        .summary(true)
-        .build();
-    opts.validate()?;
-    let ctx = session.context_with_options(&opts)?;
-    println!("Context has {} messages", ctx.messages.len());
-
-    let config = session.get_configuration()?;
-    println!("Session config: {config:?}");
+    println!("Uploaded {} message(s)", messages.len());
 
     Ok(())
 }
