@@ -711,9 +711,9 @@ async fn blocking_client_search() {
 
     Mock::given(method("POST"))
         .and(path("/v3/workspaces/ws1/search"))
-        // limit omitted: SDK no longer injects a silent default (server decides).
         .and(body_json(serde_json::json!({
-            "query": "hello"
+            "query": "hello",
+            "limit": 10
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(vec![msg_json("m1")]))
         .mount(&server)

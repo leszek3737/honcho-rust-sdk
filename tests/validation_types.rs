@@ -110,6 +110,15 @@ fn http_validation_error_absent_detail_defaults_empty() {
 }
 
 #[test]
+fn http_validation_error_null_detail_deserializes() {
+    // An explicit `{"detail": null}` must not fail deserialization.
+    let http: HTTPValidationError = serde_json::from_value(json!({ "detail": null })).unwrap();
+    assert!(http.errors().is_empty());
+    assert_eq!(http.message(), None);
+    assert_eq!(http.detail, Detail::Null(()));
+}
+
+#[test]
 fn http_validation_error_array_detail() {
     let http: HTTPValidationError = serde_json::from_value(json!({
         "detail": [

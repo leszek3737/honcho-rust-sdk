@@ -123,9 +123,8 @@ pub struct WorkspaceConfigurationSet {
 pub struct WorkspaceSearchRequest {
     /// Search query string.
     pub query: String,
-    /// Maximum number of results. Omitted lets the server choose its default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
+    /// Maximum number of results.
+    pub limit: u32,
     /// Optional metadata-based filters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<HashMap<String, serde_json::Value>>,
@@ -204,16 +203,5 @@ mod tests {
         let back: WorkspaceUpdate = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(back.metadata, None);
         assert_eq!(back.configuration, None);
-    }
-
-    #[test]
-    fn workspace_search_request_omits_absent_limit() {
-        let body = WorkspaceSearchRequest {
-            query: "q".to_owned(),
-            limit: None,
-            filters: None,
-        };
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json, serde_json::json!({ "query": "q" }));
     }
 }

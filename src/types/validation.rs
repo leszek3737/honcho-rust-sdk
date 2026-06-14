@@ -108,7 +108,8 @@ impl fmt::Display for LocationSegment {
 /// enum accepts both shapes.
 ///
 /// The [`Self::Errors`] variant is listed first so JSON arrays match the
-/// structured form; [`Self::Message`] captures the string form.
+/// structured form; [`Self::Message`] captures the string form; [`Self::Null`]
+/// captures an explicit JSON `null`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Detail {
@@ -116,6 +117,11 @@ pub enum Detail {
     Errors(Vec<ValidationError>),
     /// A plain string message (e.g. from `HTTPException(422, detail="...")`).
     Message(String),
+    /// An explicit JSON `null` detail (e.g. `HTTPException(422, detail=None)`).
+    ///
+    /// Kept last so the typed variants match first; catching `null` prevents a
+    /// hard deserialization error for that edge case.
+    Null(()),
 }
 
 impl Default for Detail {
@@ -148,7 +154,7 @@ impl HTTPValidationError {
     pub fn errors(&self) -> &[ValidationError] {
         match &self.detail {
             Detail::Errors(errors) => errors,
-            Detail::Message(_) => &[],
+            Detail::Message(_) | Detail::Null(()) => &[],
         }
     }
 
@@ -159,7 +165,7 @@ impl HTTPValidationError {
     pub fn message(&self) -> Option<&str> {
         match &self.detail {
             Detail::Message(message) => Some(message),
-            Detail::Errors(_) => None,
+            Detail::Errors(_) | Detail::Null(()) => None,
         }
     }
 }

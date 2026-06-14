@@ -91,17 +91,17 @@ pub struct DialecticOptions {
 
 /// Validate a dialectic query before sending it to the API.
 pub fn validate_dialectic_query(query: &str) -> Result<()> {
+    // Check length first with an O(MAX) probe: an overly long input is rejected
+    // without `trim` having to scan the whole (possibly whitespace-only) string.
+    if query.chars().nth(MAX_DIALECTIC_QUERY_CHARS).is_some() {
+        return Err(HonchoError::Validation(QUERY_TOO_LONG_MSG.to_owned()));
+    }
+
     // Reject whitespace-only queries, not just the empty string.
     if query.trim().is_empty() {
         return Err(HonchoError::Validation(
             "query must not be empty".to_owned(),
         ));
-    }
-
-    // Short-circuit: probe the char at the over-limit index instead of
-    // counting the whole string (which would scan every char).
-    if query.chars().nth(MAX_DIALECTIC_QUERY_CHARS).is_some() {
-        return Err(HonchoError::Validation(QUERY_TOO_LONG_MSG.to_owned()));
     }
 
     Ok(())
