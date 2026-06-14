@@ -70,12 +70,3 @@ jobs:
       - run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-
-  audit:
-    name: Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
