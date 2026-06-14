@@ -10,119 +10,404 @@ use std::path::PathBuf;
 
 use honcho_ai::types::session::SessionContext;
 use pretty_assertions::assert_eq;
+use rstest::rstest;
+
+/// Which provider format a scenario is being compared against.
+#[derive(Clone, Copy)]
+enum Provider {
+    OpenAi,
+    Anthropic,
+}
+
+impl Provider {
+    /// The fixture file holding the Python reference output for this provider.
+    fn fixture_file(self) -> &'static str {
+        match self {
+            Provider::OpenAi => "openai.json",
+            Provider::Anthropic => "anthropic.json",
+        }
+    }
+
+    /// Render a context with this provider's formatter.
+    fn render(self, ctx: &SessionContext, assistant: &str) -> Vec<serde_json::Value> {
+        match self {
+            Provider::OpenAi => ctx.to_openai(assistant),
+            Provider::Anthropic => ctx.to_anthropic(assistant),
+        }
+    }
+
+    /// The context role the provider uses for the system/context messages.
+    fn context_role(self) -> &'static str {
+        match self {
+            Provider::OpenAi => "system",
+            Provider::Anthropic => "user",
+        }
+    }
+}
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity")
 }
 
-fn load_scenario(
-    name: &str,
-) -> (
-    SessionContext,
-    Vec<serde_json::Value>,
-    Vec<serde_json::Value>,
-) {
-    let base = fixtures_dir().join(name);
-    let ctx: SessionContext =
-        serde_json::from_str(&fs::read_to_string(base.join("session_context.json")).unwrap())
-            .unwrap();
-    let openai: Vec<serde_json::Value> =
-        serde_json::from_str(&fs::read_to_string(base.join("openai.json")).unwrap()).unwrap();
-    let anthropic: Vec<serde_json::Value> =
-        serde_json::from_str(&fs::read_to_string(base.join("anthropic.json")).unwrap()).unwrap();
-    (ctx, openai, anthropic)
+/// Load only the `SessionContext` for a scenario.
+///
+/// Each loader touches a single file, so a corrupt fixture only fails the tests
+/// that actually use it (previously every test deserialized all three files).
+fn load_ctx(scenario: &str) -> SessionContext {
+    let path = fixtures_dir().join(scenario).join("session_context.json");
+    let raw = fs::read_to_string(&path).expect("session_context.json");
+    serde_json::from_str(&raw).expect("session_context.json")
 }
 
-fn normalize_peer_card(val: &mut serde_json::Value) {
-    let content = match val.get("content").and_then(|c| c.as_str()) {
-        Some(c) => c.to_string(),
-        None => return,
-    };
+/// Load only the provider reference output for a scenario.
+fn load_expected(scenario: &str, provider: Provider) -> Vec<serde_json::Value> {
+    let file = provider.fixture_file();
+    let path = fixtures_dir().join(scenario).join(file);
+    let raw = fs::read_to_string(&path).expect(file);
+    serde_json::from_str(&raw).expect(file)
+}
 
-    if let Some(inner) = content
-        .strip_prefix("<peer_card>")
-        .and_then(|s| s.strip_suffix("</peer_card>"))
-    {
-        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(inner) {
-            val["content"] = serde_json::Value::String(format!(
-                "<peer_card>{}</peer_card>",
-                serde_json::to_string(&parsed).expect("re-serializing parsed JSON should not fail")
-            ));
-        } else {
-            let fixed = inner.replace('\'', "\"");
-            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&fixed) {
-                val["content"] = serde_json::Value::String(format!(
-                    "<peer_card>{}</peer_card>",
-                    serde_json::to_string(&parsed)
-                        .expect("re-serializing parsed JSON should not fail")
-                ));
+/// Compare Rust output against the Python reference for a scenario.
+///
+/// The comparison is RAW: neither side is normalized. For the canonical
+/// scenarios Rust must be byte-identical to Python, so any formatting
+/// regression (e.g. emitting JSON-style `["a","b"]` instead of Python-style
+/// `['a', 'b']` for a peer card) is caught here rather than being canonicalized
+/// away. The earlier two-sided normalization masked exactly that divergence.
+fn assert_parity(scenario: &str, assistant: &str, provider: Provider) {
+    let ctx = load_ctx(scenario);
+    let actual = provider.render(&ctx, assistant);
+    let expected = load_expected(scenario, provider);
+    assert_eq!(actual, expected);
+}
+
+#[rstest]
+#[case("small", "assistant")]
+#[case("multi_peer", "bot")]
+#[case("with_summary", "assistant")]
+fn parity_openai(#[case] scenario: &str, #[case] assistant: &str) {
+    assert_parity(scenario, assistant, Provider::OpenAi);
+}
+
+#[rstest]
+#[case("small", "assistant")]
+#[case("multi_peer", "bot")]
+#[case("with_summary", "assistant")]
+fn parity_anthropic(#[case] scenario: &str, #[case] assistant: &str) {
+    assert_parity(scenario, assistant, Provider::Anthropic);
+}
+
+// ── one-sided normalization for the Python peer-card quirk ────────────
+
+/// Re-render logical card items exactly as the Rust SDK's `format_peer_card`:
+/// always single-quoted, backslash escaped first, then the single quote.
+fn rust_peer_card(items: &[String]) -> String {
+    let rendered: Vec<String> = items
+        .iter()
+        .map(|s| format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")))
+        .collect();
+    format!("[{}]", rendered.join(", "))
+}
+
+/// Parse a Python `repr(list[str])` into its logical items.
+///
+/// Tolerates Python's delimiter quirk: an item is rendered `'...'` unless it
+/// contains a single quote (and no double quote), in which case Python switches
+/// to `"..."`. Returns `None` if the input is not a recognizable string list.
+fn parse_python_str_list(s: &str) -> Option<Vec<String>> {
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut items = Vec::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        while matches!(chars.peek(), Some(' ' | ',')) {
+            chars.next();
+        }
+        let quote = chars.next()?;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+        let mut item = String::new();
+        loop {
+            match chars.next()? {
+                '\\' => match chars.next()? {
+                    '\\' => item.push('\\'),
+                    '\'' => item.push('\''),
+                    '"' => item.push('"'),
+                    other => {
+                        item.push('\\');
+                        item.push(other);
+                    }
+                },
+                c if c == quote => break,
+                c => item.push(c),
             }
         }
+        items.push(item);
+        if chars.peek().is_none() {
+            break;
+        }
+    }
+    Some(items)
+}
+
+/// One-sided normalization of a Python `<peer_card>` message.
+///
+/// Applied to the EXPECTED (Python) side ONLY. It re-renders Python's list repr
+/// into the Rust SDK's canonical single-quote-escaped form, bridging the one
+/// known cross-SDK divergence: Python's `repr` switches an item's delimiter to
+/// `"..."` when it contains a single quote, whereas Rust always uses `'...'`
+/// with backslash escaping. The actual (Rust) side is never touched, so a real
+/// Rust formatting regression still fails the comparison.
+fn normalize_python_peer_card(msg: &mut serde_json::Value) {
+    let Some(content) = msg.get("content").and_then(|c| c.as_str()) else {
+        return;
+    };
+    // Cheap prefix/suffix check on the borrowed `&str` before any allocation.
+    let Some(inner) = content
+        .strip_prefix("<peer_card>")
+        .and_then(|s| s.strip_suffix("</peer_card>"))
+    else {
+        return;
+    };
+    if let Some(items) = parse_python_str_list(inner) {
+        msg["content"] =
+            serde_json::Value::String(format!("<peer_card>{}</peer_card>", rust_peer_card(&items)));
     }
 }
 
-fn normalize_expected(messages: &mut [serde_json::Value]) {
-    for msg in messages.iter_mut() {
-        normalize_peer_card(msg);
+#[test]
+fn parity_peer_card_apostrophe_python_quirk_one_sided() {
+    // Logical card item contains a single quote. Rust and Python DIVERGE here:
+    //   Rust   : <peer_card>['it\'s', 'plain']</peer_card>
+    //   Python : <peer_card>["it's", 'plain']</peer_card>   (delimiter switch)
+    // We reconcile by normalizing the Python (expected) side ONLY.
+    //
+    // The expected Python value below is HAND-VERIFIED, not loaded from a
+    // generated fixture, and deliberately so. The parity fixture generator
+    // (`tests/fixtures/parity/_generate.py`) covers only the small / multi_peer
+    // / with_summary scenarios and, more importantly, requires the `honcho`
+    // Python SDK to be importable to run. That SDK is not vendored in this repo
+    // (no sibling package, not on PyPI under this name), so the fixture cannot
+    // be regenerated reliably from this checkout. Rather than commit a
+    // hand-faked file disguised as generated output, we encode the reference
+    // inline and document the exact CPython rule it mirrors.
+    //
+    // CPython `repr(list[str])` per-item quote selection (stable, deterministic
+    // since 3.x — see Objects/unicodeobject.c `unicode_repr`):
+    //   - default delimiter is `'`;
+    //   - if the item contains `'` AND NOT `"`, switch the delimiter to `"`
+    //     and emit the apostrophe UNescaped (this is the quirk under test);
+    //   - if it contains BOTH `'` and `"`, keep `'` and escape apostrophes as
+    //     `\'`;
+    //   - backslashes are always escaped as `\\`.
+    // Rust's `format_peer_card` never switches delimiter: it always uses `'`
+    // with backslash escaping, which is the only cross-SDK divergence here.
+    // `parse_python_str_list` is unit-tested below to confirm it round-trips
+    // every branch of this rule.
+    let ctx: SessionContext = serde_json::from_value(serde_json::json!({
+        "id": "sess_special",
+        "messages": [],
+        "peer_card": ["it's", "plain"],
+    }))
+    .unwrap();
+
+    let actual = ctx.to_openai("assistant");
+    assert_eq!(actual.len(), 1);
+    // Rust raw output: single-quote delimiter, escaped apostrophe.
+    assert_eq!(
+        actual[0]["content"],
+        "<peer_card>['it\\'s', 'plain']</peer_card>"
+    );
+
+    // Hand-verified Python reference (what `repr(list[str])` emits): the
+    // apostrophe item switches to a double-quote delimiter.
+    let mut expected = vec![serde_json::json!({
+        "role": "system",
+        "content": "<peer_card>[\"it's\", 'plain']</peer_card>",
+    })];
+
+    // One-sided: normalize the EXPECTED side only. The actual side stays raw, so
+    // a Rust regression (e.g. JSON-style quoting) would still fail this test.
+    normalize_python_peer_card(&mut expected[0]);
+
+    assert_eq!(actual, expected);
+}
+
+/// `parse_python_str_list` must recover the logical items from every branch of
+/// `CPython`'s `repr(list[str])` quote-selection rule, since the one-sided
+/// normalization above relies on it to bridge the apostrophe quirk. Each input
+/// here is the literal string `CPython` would print for the commented logical
+/// list (verified against `python3 -c "print(repr([...]))"`).
+#[test]
+fn parse_python_str_list_covers_repr_quote_rules() {
+    // Plain items: default single-quote delimiter.
+    assert_eq!(
+        parse_python_str_list("['friendly', 'concise']"),
+        Some(vec!["friendly".to_string(), "concise".to_string()])
+    );
+    // Single apostrophe -> Python switches that item to double-quote delimiter.
+    assert_eq!(
+        parse_python_str_list("[\"it's\", 'plain']"),
+        Some(vec!["it's".to_string(), "plain".to_string()])
+    );
+    // Multiple apostrophes in one item, still double-quote delimited.
+    assert_eq!(
+        parse_python_str_list("[\"a'b'c\"]"),
+        Some(vec!["a'b'c".to_string()])
+    );
+    // Apostrophe at the leading and trailing boundary of items.
+    assert_eq!(
+        parse_python_str_list("[\"'lead\", \"trail'\"]"),
+        Some(vec!["'lead".to_string(), "trail'".to_string()])
+    );
+    // Both quote kinds present -> Python keeps single-quote delimiter and
+    // escapes the apostrophe as `\'` (repr(['\'"']) == ['\'"']).
+    assert_eq!(
+        parse_python_str_list("['\\'\"']"),
+        Some(vec!["'\"".to_string()])
+    );
+    // Backslash is always escaped as `\\`.
+    assert_eq!(
+        parse_python_str_list("['back\\\\slash']"),
+        Some(vec!["back\\slash".to_string()])
+    );
+    // Empty list.
+    assert_eq!(parse_python_str_list("[]"), Some(Vec::new()));
+    // Not a string list at all.
+    assert_eq!(parse_python_str_list("not a list"), None);
+}
+
+// ── single-part contexts (spec parity, no Python fixture needed) ──────
+
+#[rstest]
+#[case(Provider::OpenAi)]
+#[case(Provider::Anthropic)]
+fn parity_peer_representation_only(#[case] provider: Provider) {
+    let ctx: SessionContext = serde_json::from_value(serde_json::json!({
+        "id": "s",
+        "messages": [],
+        "peer_representation": "User likes Rust",
+    }))
+    .unwrap();
+    let expected = vec![serde_json::json!({
+        "role": provider.context_role(),
+        "content": "<peer_representation>User likes Rust</peer_representation>",
+    })];
+    assert_eq!(provider.render(&ctx, "assistant"), expected);
+}
+
+#[rstest]
+#[case(Provider::OpenAi)]
+#[case(Provider::Anthropic)]
+fn parity_peer_card_only(#[case] provider: Provider) {
+    let ctx: SessionContext = serde_json::from_value(serde_json::json!({
+        "id": "s",
+        "messages": [],
+        "peer_card": ["friendly", "concise"],
+    }))
+    .unwrap();
+    let expected = vec![serde_json::json!({
+        "role": provider.context_role(),
+        "content": "<peer_card>['friendly', 'concise']</peer_card>",
+    })];
+    assert_eq!(provider.render(&ctx, "assistant"), expected);
+}
+
+#[rstest]
+#[case(Provider::OpenAi)]
+#[case(Provider::Anthropic)]
+fn parity_summary_only(#[case] provider: Provider) {
+    let ctx: SessionContext = serde_json::from_value(serde_json::json!({
+        "id": "s",
+        "messages": [],
+        "summary": {
+            "content": "A short recap.",
+            "message_id": "m0",
+            "summary_type": "short",
+            "created_at": "2025-01-15T10:30:00Z",
+            "token_count": 5
+        },
+    }))
+    .unwrap();
+    let expected = vec![serde_json::json!({
+        "role": provider.context_role(),
+        "content": "<summary>A short recap.</summary>",
+    })];
+    assert_eq!(provider.render(&ctx, "assistant"), expected);
+}
+
+#[rstest]
+#[case(Provider::OpenAi)]
+#[case(Provider::Anthropic)]
+fn parity_empty_context_is_empty_list(#[case] provider: Provider) {
+    let ctx: SessionContext =
+        serde_json::from_value(serde_json::json!({ "id": "s", "messages": [] })).unwrap();
+    assert_eq!(
+        provider.render(&ctx, "assistant"),
+        Vec::<serde_json::Value>::new()
+    );
+}
+
+#[test]
+fn parity_multiline_content_preserved() {
+    let ctx: SessionContext = serde_json::from_value(serde_json::json!({
+        "id": "s",
+        "messages": [{
+            "id": "m1",
+            "content": "line one\nline two",
+            "peer_id": "user1",
+            "session_id": "s",
+            "metadata": {},
+            "created_at": "2025-01-15T10:30:00Z",
+            "workspace_id": "ws_1",
+            "token_count": 1
+        }],
+    }))
+    .unwrap();
+
+    let openai = ctx.to_openai("assistant");
+    assert_eq!(openai[0]["content"], "line one\nline two");
+
+    let anthropic = ctx.to_anthropic("assistant");
+    assert_eq!(anthropic[0]["content"], "user1: line one\nline two");
+}
+
+#[test]
+fn parity_assistant_absent_all_user_role() {
+    // The assistant name matches no peer in the fixture, so every OpenAI entry
+    // is a `user` while the peer ids survive in `name`.
+    let ctx = load_ctx("small");
+    let actual = ctx.to_openai("nobody");
+
+    for entry in &actual {
+        assert_eq!(entry["role"], "user");
     }
+    assert_eq!(actual[1]["name"], "assistant");
 }
 
-#[test]
-fn parity_small_openai() {
-    let (ctx, expected, _) = load_scenario("small");
-    let mut actual = ctx.to_openai("assistant");
-    let mut exp = expected;
-    normalize_expected(&mut exp);
-    normalize_expected(&mut actual);
-    assert_eq!(actual, exp);
-}
+// ── IntoAssistantRef accepted forms ──────────────────────────────────
 
 #[test]
-fn parity_small_anthropic() {
-    let (ctx, _, expected) = load_scenario("small");
-    let mut actual = ctx.to_anthropic("assistant");
-    let mut exp = expected;
-    normalize_expected(&mut exp);
-    normalize_expected(&mut actual);
-    assert_eq!(actual, exp);
+fn parity_into_assistant_ref_string_matches_str() {
+    let ctx = load_ctx("small");
+    assert_eq!(
+        ctx.to_openai("assistant"),
+        ctx.to_openai(String::from("assistant"))
+    );
+    assert_eq!(
+        ctx.to_anthropic("assistant"),
+        ctx.to_anthropic(String::from("assistant"))
+    );
 }
 
-#[test]
-fn parity_multi_peer_openai() {
-    let (ctx, expected, _) = load_scenario("multi_peer");
-    let mut actual = ctx.to_openai("bot");
-    let mut exp = expected;
-    normalize_expected(&mut exp);
-    normalize_expected(&mut actual);
-    assert_eq!(actual, exp);
-}
-
-#[test]
-fn parity_multi_peer_anthropic() {
-    let (ctx, _, expected) = load_scenario("multi_peer");
-    let mut actual = ctx.to_anthropic("bot");
-    let mut exp = expected;
-    normalize_expected(&mut exp);
-    normalize_expected(&mut actual);
-    assert_eq!(actual, exp);
-}
-
-#[test]
-fn parity_with_summary_openai() {
-    let (ctx, expected, _) = load_scenario("with_summary");
-    let mut actual = ctx.to_openai("assistant");
-    let mut exp = expected;
-    normalize_expected(&mut exp);
-    normalize_expected(&mut actual);
-    assert_eq!(actual, exp);
-}
-
-#[test]
-fn parity_with_summary_anthropic() {
-    let (ctx, _, expected) = load_scenario("with_summary");
-    let mut actual = ctx.to_anthropic("assistant");
-    let mut exp = expected;
-    normalize_expected(&mut exp);
-    normalize_expected(&mut actual);
-    assert_eq!(actual, exp);
-}
+// `&Peer` needs a live client to build, so its `IntoAssistantRef` impl is
+// pinned at compile time only (this file performs no network I/O).
+const _: fn() = || {
+    fn assert_into_assistant_ref<T: honcho_ai::types::session::IntoAssistantRef>() {}
+    assert_into_assistant_ref::<&honcho_ai::Peer>();
+    assert_into_assistant_ref::<String>();
+    assert_into_assistant_ref::<&str>();
+};

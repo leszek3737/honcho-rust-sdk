@@ -220,6 +220,232 @@ fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// Wiremock test helpers
+//
+// Shared HTTP-mock fixtures for the wiremock-based unit tests (Peer, Session,
+// client, pagination). These factor out the `reqwest::Client::new()`,
+// `make_honcho`, response-builder, and pagination-fetcher boilerplate that was
+// previously copy-pasted across ~10 test files.
+//
+// Everything below is independent of the OpenAPI schema helpers above; the two
+// sections share only the crate-level `#![allow(dead_code, …)]`.
+// ════════════════════════════════════════════════════════════════════════
+
+use std::future::Future;
+use std::pin::Pin;
+
+use honcho_ai::Honcho;
+use honcho_ai::error::HonchoError;
+use honcho_ai::types::pagination::PageResponse;
+use honcho_ai::types::peer::Peer;
+use serde_json::json;
+use wiremock::matchers::{body_json, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Default workspace id used by the wiremock test fixtures.
+///
+/// Chosen because the existing suite already standardizes on `"ws1"` in every
+/// mocked path and request body, so adopting helpers requires no churn.
+pub const TEST_WORKSPACE_ID: &str = "ws1";
+
+/// Fixed API key injected into the test client. The mock server never checks
+/// authorization, so the value only has to be non-empty and stable.
+const TEST_API_KEY: &str = "test-api-key";
+
+/// Fixed `created_at` timestamp (RFC 3339) used by every response builder.
+///
+/// `created_at` deserializes into `chrono::DateTime<Utc>`, so it must be a
+/// valid RFC 3339 instant.
+const TEST_CREATED_AT: &str = "2025-01-15T10:30:00Z";
+
+/// Returns the process-wide shared `reqwest::Client`, built once.
+///
+/// `reqwest::Client` is internally reference-counted, so cloning is cheap and
+/// every test shares one connection pool instead of constructing a fresh client
+/// per request (the `reqwest::Client::new()` duplication the audit flagged).
+pub fn http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
+/// Builds a [`Honcho`] pointed at `base_url` for the default test workspace
+/// ([`TEST_WORKSPACE_ID`]), with a fixed API key and default retry policy.
+///
+/// Panics if construction fails (a broken test setup, never a runtime path).
+pub fn make_honcho(base_url: &str) -> Honcho {
+    make_honcho_with(base_url, TEST_WORKSPACE_ID)
+}
+
+/// Like [`make_honcho`] but with retries disabled (`max_retries(0)`).
+///
+/// Error-path tests assert that a single 5xx surfaces after exactly one attempt.
+/// With the default retry policy an idempotent verb would be retried (sleeping
+/// through backoff) before the error is observed, making both the call count and
+/// the timing non-deterministic. Disabling retries keeps those tests fast and
+/// their `.expect(1)` mock assertions exact.
+///
+/// Panics if construction fails (a broken test setup, never a runtime path).
+pub fn make_honcho_no_retry(base_url: &str) -> Honcho {
+    Honcho::from_params(
+        Honcho::builder()
+            .base_url(base_url)
+            .workspace_id(TEST_WORKSPACE_ID)
+            .api_key(TEST_API_KEY)
+            .max_retries(0)
+            .build(),
+    )
+    .expect("construct no-retry Honcho test client")
+}
+
+/// Like [`make_honcho`] but with an explicit `workspace_id`, for tests that
+/// exercise more than one workspace.
+pub fn make_honcho_with(base_url: &str, workspace_id: &str) -> Honcho {
+    Honcho::from_params(
+        Honcho::builder()
+            .base_url(base_url)
+            .workspace_id(workspace_id)
+            .api_key(TEST_API_KEY)
+            .build(),
+    )
+    .expect("construct Honcho test client")
+}
+
+/// JSON body for a `Workspace` response (`POST /v3/workspaces` and friends).
+pub fn workspace_response(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "metadata": {},
+        "configuration": {},
+        "created_at": TEST_CREATED_AT
+    })
+}
+
+/// JSON body for a `Peer` response (peer get-or-create / refresh).
+pub fn peer_response(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "workspace_id": TEST_WORKSPACE_ID,
+        "created_at": TEST_CREATED_AT,
+        "metadata": {},
+        "configuration": {}
+    })
+}
+
+/// JSON body for a `SessionResponse` (session get-or-create / refresh).
+pub fn session_response(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "is_active": true,
+        "workspace_id": TEST_WORKSPACE_ID,
+        "metadata": {},
+        "configuration": {},
+        "created_at": TEST_CREATED_AT
+    })
+}
+
+/// Builds the SDK's paginated wire shape (`Page` / `PageResponse`) wrapping the
+/// already-serialized `items`.
+///
+/// `items` is taken by value so call sites can hand over an owned `Vec` without
+/// an extra clone.
+#[allow(clippy::needless_pass_by_value)]
+pub fn page_json(
+    items: Vec<serde_json::Value>,
+    total: u64,
+    page: u64,
+    size: u64,
+    pages: u64,
+) -> serde_json::Value {
+    json!({
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": pages
+    })
+}
+
+/// Returns an *un-mounted* `Mock` for the workspace-ensure POST.
+///
+/// Matches `POST /v3/workspaces` with body `{"id": workspace_id}` and responds
+/// `200` + [`workspace_response`]. The caller decides the call-count
+/// expectation (`.expect(..)` / `.up_to_n_times(..)`) and mounts it:
+///
+/// ```ignore
+/// workspace_ensure_mock("ws1").expect(1).mount(&server).await;
+/// ```
+pub fn workspace_ensure_mock(workspace_id: &str) -> Mock {
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
+        .and(body_json(json!({ "id": workspace_id })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_response(workspace_id)))
+}
+
+/// Mounts the workspace-ensure POST for [`TEST_WORKSPACE_ID`] with an explicit
+/// call-count expectation that wiremock verifies on server drop.
+///
+/// Convenience wrapper around [`workspace_ensure_mock`] for the common
+/// single-workspace flow.
+pub async fn mount_workspace_ensure(server: &MockServer, expect: u64) {
+    workspace_ensure_mock(TEST_WORKSPACE_ID)
+        .expect(expect)
+        .mount(server)
+        .await;
+}
+
+/// Builds the next-page fetcher closure used to drive `Page::next_page` /
+/// `Page::into_stream` against a mock server.
+///
+/// This lifts the ~15-line `with_fetcher` closure duplicated across the
+/// pagination tests: it POSTs to `base_url + list_path` with the `page`/`size`
+/// query params and the captured JSON `body`, then deserializes the response
+/// into `PageResponse<Peer>`. Adopt it with:
+///
+/// ```ignore
+/// let page = page1_resp.with_fetcher(peer_fetcher(
+///     &server.uri(),
+///     "/v3/workspaces/ws1/peers/list",
+///     2,
+///     serde_json::json!({}),
+/// ));
+/// ```
+#[allow(clippy::needless_pass_by_value)]
+pub fn peer_fetcher(
+    base_url: &str,
+    list_path: &str,
+    size: u64,
+    body: serde_json::Value,
+) -> impl Fn(u64) -> Pin<Box<dyn Future<Output = honcho_ai::error::Result<PageResponse<Peer>>> + Send>>
++ use<> {
+    // `+ use<>` opts the returned `impl Fn` out of capturing *any* generic or
+    // lifetime parameter (precise capturing, edition 2024). The closure body
+    // below `.to_owned()`s `base_url` and `list_path` into owned `String`s and
+    // clones `body`, so it borrows nothing from the arguments and the returned
+    // type is genuinely `'static`. Without `use<>` RPIT would capture the input
+    // `&str` lifetimes, forcing callers to hand in `'static` strings (e.g. by
+    // leaking `server.uri()`); `use<>` removes that artificial requirement.
+    let base = base_url.to_owned();
+    let list_path = list_path.to_owned();
+    move |page_num: u64| {
+        let url = format!("{base}{list_path}");
+        let body = body.clone();
+        Box::pin(async move {
+            let response = http_client()
+                .post(url)
+                .query(&[("page", page_num)])
+                .query(&[("size", size)])
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(HonchoError::Transport)?;
+            let pr: PageResponse<Peer> = response.json().await.map_err(HonchoError::Transport)?;
+            Ok(pr)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

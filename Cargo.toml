@@ -28,6 +28,8 @@ rustls-tls = ["reqwest/rustls-tls"]
 native-tls = ["reqwest/native-tls"]
 tracing = ["dep:tracing"]
 blocking = []
+# Gates the `tests/integration` target, which requires a running Honcho server.
+integration = []
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "http2"] }
@@ -73,6 +75,10 @@ required-features = ["blocking"]
 [[test]]
 name = "blocking_runtime_guard"
 required-features = ["blocking"]
+
+[[test]]
+name = "integration"
+required-features = ["integration"]
 
 [package.metadata.docs.rs]
 all-features = true
