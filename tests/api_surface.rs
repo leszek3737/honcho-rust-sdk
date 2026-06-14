@@ -84,6 +84,23 @@ fn _builders_compile(c: &honcho_ai::Honcho) {
     let _peer_fut = c.peer("a").build();
     let _session_fut = c.session("s").build();
     let _search_fut = c.search("q").build();
+
+    // The `peer` builder also exposes a `.config(..)` member (the `configuration`
+    // field renamed via `#[builder(name = config)]`). `bon` strips the `Option`,
+    // so the setter takes the inner map by value. Type inference fixes the
+    // element type from the setter signature, so the test crate never has to name
+    // `serde_json::Value` (which is not a dev-dependency).
+    let peer_cfg = std::collections::HashMap::new();
+    let _peer_cfg_fut = c.peer("a").config(peer_cfg).build();
+
+    // Analogue for `session`: the `configuration` member's `.configuration(..)`
+    // setter takes a `SessionConfiguration` by value (`bon` Option-stripped).
+    // `Default` yields a valid empty config without touching the `pub(crate)`
+    // constructors.
+    let _session_cfg_fut = c
+        .session("s")
+        .configuration(honcho_ai::SessionConfiguration::default())
+        .build();
 }
 
 #[test]

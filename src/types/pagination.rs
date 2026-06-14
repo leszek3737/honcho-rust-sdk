@@ -499,11 +499,7 @@ fn build_page_query<'a>(page: &'a str, size: &'a str, reverse: bool) -> Vec<(&'a
 ///
 /// The returned [`Page`] carries an attached fetcher so that
 /// [`Page::next_page`] works automatically.
-///
-/// TODO(F4): reduce visibility to `pub(crate)` once the high-level
-/// Honcho client exposes public paginated methods.
-#[doc(hidden)]
-pub async fn paginate_post<T>(
+pub(crate) async fn paginate_post<T>(
     http: &HttpClient,
     route: &str,
     body: Option<&serde_json::Value>,

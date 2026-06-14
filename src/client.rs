@@ -20,8 +20,16 @@ use crate::types::peer::Peer as PeerResponse;
 use crate::types::session::SessionResponse;
 use crate::types::workspace::{Workspace, WorkspaceConfiguration};
 
+/// Default `limit` for workspace search when the builder caller leaves it unset.
+///
+/// Single source of truth shared by the async [`Honcho::search`] builder and its
+/// blocking mirror (`crate::blocking::Honcho::search`) so both surfaces stay in
+/// lockstep instead of carrying independent magic literals.
+pub(crate) const DEFAULT_SEARCH_LIMIT: u32 = 10;
+
 /// API environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Environment {
     /// Local development server.
     Local,
@@ -498,24 +506,7 @@ impl Honcho {
             ));
         }
         self.ensure_workspace().await?;
-        let peers_map = peers.map(|specs| {
-            specs
-                .into_iter()
-                .map(|s| {
-                    let (sid, cfg) = match s {
-                        PeerSpec::Id(id) => (
-                            id,
-                            crate::SessionPeerConfig {
-                                observe_me: None,
-                                observe_others: None,
-                            },
-                        ),
-                        PeerSpec::WithConfig(id, cfg) => (id, cfg),
-                    };
-                    (sid, cfg)
-                })
-                .collect()
-        });
+        let peers_map = peers.map(|specs| specs.into_iter().map(PeerSpec::into_parts).collect());
         let body = crate::types::session::SessionCreate {
             id,
             metadata,
@@ -574,7 +565,7 @@ impl Honcho {
     pub async fn search(
         &self,
         #[builder(start_fn)] query: String,
-        #[builder(default = 10)] limit: u32,
+        #[builder(default = DEFAULT_SEARCH_LIMIT)] limit: u32,
         filters: Option<HashMap<String, Value>>,
     ) -> Result<Vec<crate::Message>> {
         self.ensure_workspace().await?;
