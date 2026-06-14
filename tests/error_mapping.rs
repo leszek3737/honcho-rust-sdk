@@ -489,6 +489,259 @@ async fn transport_error_from_url_parse_is_not_retryable_with_source() {
     );
 }
 
+// === Serialization variant: code / status_code / message ===
+
+#[test]
+fn serialization_variant_code_status_and_message() {
+    // A trivial serde failure to populate the `source` field.
+    let source = serde_json::from_str::<i32>("x").unwrap_err();
+    let err = HonchoError::Serialization {
+        path: "X".into(),
+        source,
+    };
+
+    assert_eq!(err.code(), "serialization_error");
+    assert_eq!(err.status_code(), None, "Serialization has no HTTP status");
+    assert_eq!(err.message(), "failed to serialize request");
+}
+
+// === §169: a genuine serialize failure maps to `Serialization` (not Decode) ===
+//
+// The variant above is fed a *parse* error for brevity; this test pins the
+// behavioural intent of the serialize-error recategorization: a real `serde_json` *serialize*
+// failure (a map whose keys do not serialize to strings) must land in
+// `Serialization`, never `Decode`/`Configuration`. End-to-end through the public
+// API this path cannot be reached (metadata/config are `HashMap<String, Value>`,
+// which always serialize), so the failure is constructed at the serde boundary
+// and the static recategorization is verified at the call sites.
+//
+// `serde_json` classifies a "key must be a string" error as `Category::Syntax`
+// (same bucket as a parse error), so `classify()` alone cannot tell serialize
+// from parse — the distinguishing, serializer-only signal is the Display text,
+// which for a serializer error carries no `line/column` suffix.
+#[test]
+fn genuine_serialize_failure_maps_to_serialization_variant() {
+    use std::collections::BTreeMap;
+
+    // A non-string map key forces a real serialize failure out of `serde_json`.
+    let mut bad: BTreeMap<(i32, i32), i32> = BTreeMap::new();
+    bad.insert((1, 2), 3);
+    let source = serde_json::to_string(&bad)
+        .expect_err("tuple-keyed map must fail to serialize as a JSON object");
+
+    // Proves the source is a *serialize* error, not a parse error: this exact
+    // message is produced only by the serializer's map-key path.
+    assert_eq!(
+        source.to_string(),
+        "key must be a string",
+        "expected the serializer's key error, not a parse/syntax error"
+    );
+
+    let err = HonchoError::Serialization {
+        path: "metadata".into(),
+        source,
+    };
+
+    assert!(matches!(err, HonchoError::Serialization { .. }));
+    assert_eq!(err.code(), "serialization_error");
+    assert_eq!(err.status_code(), None);
+    assert_eq!(err.message(), "failed to serialize request");
+
+    // The wrapped source survives in the chain and is still the serialize error.
+    let chained = err.source().expect("Serialization wraps a source");
+    assert_eq!(
+        chained.to_string(),
+        "key must be a string",
+        "the serialize error must be preserved as the variant's source"
+    );
+}
+
+// === parity: every HonchoError variant exercises code/status_code/message ===
+//
+// Single source of truth for the full variant matrix: asserts `code()` and
+// `status_code()` for all 18 variants (including the new `Serialization`) and
+// exercises `message()` on each. Complements the from_response-reachable
+// `code()` check above and the constructed-directly coverage in
+// tests/error_methods.rs.
+//
+// Exhaustive table-style parity test: the length is the inline `cases` vec with
+// one entry per `HonchoError` variant. Splitting it would fragment the single
+// source of truth, so the line cap is waived deliberately.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn every_variant_code_status_message_parity() {
+    fn serde_err() -> serde_json::Error {
+        serde_json::from_str::<i32>("x").unwrap_err()
+    }
+    // A `reqwest::Error` without touching the network: the malformed URL is
+    // rejected when the request is built.
+    fn reqwest_err() -> reqwest::Error {
+        reqwest::Client::new()
+            .get("ht!tp://[invalid")
+            .build()
+            .unwrap_err()
+    }
+
+    let cases: Vec<(HonchoError, &str, Option<u16>)> = vec![
+        (
+            HonchoError::BadRequest {
+                message: "m".into(),
+                body: None,
+            },
+            "bad_request",
+            Some(400),
+        ),
+        (
+            HonchoError::Authentication {
+                message: "m".into(),
+            },
+            "authentication_error",
+            Some(401),
+        ),
+        (
+            HonchoError::PermissionDenied {
+                message: "m".into(),
+            },
+            "permission_denied",
+            Some(403),
+        ),
+        (
+            HonchoError::NotFound {
+                message: "m".into(),
+            },
+            "not_found",
+            Some(404),
+        ),
+        (
+            HonchoError::Conflict {
+                message: "m".into(),
+                body: None,
+            },
+            "conflict",
+            Some(409),
+        ),
+        (
+            HonchoError::UnprocessableEntity {
+                message: "m".into(),
+                body: None,
+            },
+            "unprocessable_entity",
+            Some(422),
+        ),
+        (
+            HonchoError::RateLimit {
+                message: "m".into(),
+                retry_after: None,
+            },
+            "rate_limit_exceeded",
+            Some(429),
+        ),
+        (
+            HonchoError::Client {
+                status: 405,
+                message: "m".into(),
+            },
+            "client_error",
+            Some(405),
+        ),
+        (
+            HonchoError::Server {
+                status: 500,
+                message: "m".into(),
+            },
+            "server_error",
+            Some(500),
+        ),
+        (
+            HonchoError::Timeout {
+                message: "m".into(),
+            },
+            "timeout",
+            None,
+        ),
+        (
+            HonchoError::Connection {
+                message: "m".into(),
+            },
+            "connection_error",
+            None,
+        ),
+        (
+            HonchoError::Transport(reqwest_err()),
+            "transport_error",
+            None,
+        ),
+        (
+            HonchoError::Decode {
+                path: "root".into(),
+                source: serde_err(),
+            },
+            "decode_error",
+            None,
+        ),
+        (
+            HonchoError::Serialization {
+                path: "X".into(),
+                source: serde_err(),
+            },
+            "serialization_error",
+            None,
+        ),
+        (
+            HonchoError::Io(std::io::Error::other("boom")),
+            "io_error",
+            None,
+        ),
+        (
+            HonchoError::Configuration("c".into()),
+            "configuration_error",
+            None,
+        ),
+        (
+            HonchoError::Validation("v".into()),
+            "validation_error",
+            None,
+        ),
+        (
+            // status_code() delegates to the inner error (here: None).
+            HonchoError::PartialFailure {
+                messages: vec![],
+                sent: 0,
+                error: Box::new(HonchoError::Validation("inner".into())),
+            },
+            "partial_failure",
+            None,
+        ),
+    ];
+
+    // 18 variants total — guards against silently forgetting one when the enum
+    // grows (it is `#[non_exhaustive]`, so this is a manual completeness check).
+    assert_eq!(
+        cases.len(),
+        18,
+        "expected every HonchoError variant covered"
+    );
+
+    for (err, expected_code, expected_status) in &cases {
+        assert_eq!(
+            err.code(),
+            *expected_code,
+            "code() mismatch for {expected_code}"
+        );
+        assert_eq!(
+            err.status_code(),
+            *expected_status,
+            "status_code() mismatch for {expected_code}"
+        );
+        // Exercise message(): must be callable and non-panicking for every
+        // variant. It must never be empty.
+        assert!(
+            !err.message().is_empty(),
+            "message() empty for {expected_code}"
+        );
+    }
+}
+
 // === bounds ===
 
 #[test]

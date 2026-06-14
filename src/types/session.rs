@@ -13,7 +13,7 @@ pub use super::dream::SessionQueueStatus;
 /// A conversation session containing messages between peers.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Session {
+pub struct SessionResponse {
     /// Unique session identifier.
     pub id: String,
     /// Whether the session is currently active.
@@ -140,7 +140,7 @@ pub struct SessionConfiguration {
 
 /// Per-peer observation settings within a session.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPeerConfig {
     /// Whether Honcho will use reasoning to form a representation of this peer.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -452,7 +452,7 @@ fn default_size() -> u64 {
 }
 
 /// A paginated list of sessions.
-pub type SessionPage = super::pagination::Page<Session>;
+pub type SessionPage = super::pagination::Page<SessionResponse>;
 
 /// Resolves an assistant name from various reference types.
 ///

@@ -13,8 +13,18 @@ use tokio::io::AsyncRead;
 ///
 /// The API currently accepts `text/plain`, `application/pdf`, and
 /// `application/json`; other MIME types may be rejected by the server.
+///
+/// This enum is `#[non_exhaustive]`: new variants may be added in future
+/// versions without a breaking change, and each data-carrying variant is
+/// likewise `#[non_exhaustive]` so that new fields can be added to it
+/// non-breakingly. Out-of-crate code must construct values through the
+/// provided constructors ([`FileSource::bytes`], [`FileSource::path`],
+/// [`FileSource::stream`], or the `From` impls) rather than variant literals,
+/// and cannot exhaustively `match` on the variants or their fields.
+#[non_exhaustive]
 pub enum FileSource {
     /// Raw bytes with explicit filename and content type.
+    #[non_exhaustive]
     Bytes {
         /// File name to send.
         filename: String,
@@ -24,8 +34,10 @@ pub enum FileSource {
         content_type: String,
     },
     /// A filesystem path. Resolved at upload time.
+    #[non_exhaustive]
     Path(PathBuf),
     /// A streaming reader — fully buffered into memory before uploading.
+    #[non_exhaustive]
     Stream {
         /// File name to send.
         filename: String,

@@ -21,7 +21,7 @@ use crate::types::message::{MessageCreate, MessageResponse, MessageSearchOptions
 use crate::types::pagination::{self, Page};
 use crate::types::peer::Peer as PeerResponse;
 use crate::types::peer::{PeerCardResponse, PeerCardSet, PeerConfig, PeerContext};
-use crate::types::session::{Session, SessionListOptions, validate_search_params};
+use crate::types::session::{SessionListOptions, SessionResponse, validate_search_params};
 
 pub(crate) struct PeerInner {
     http: HttpClient,
@@ -627,7 +627,7 @@ impl Peer {
     /// # }
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(peer_id = self.inner.id.as_str())))]
-    pub async fn sessions(&self) -> Result<Page<Session>> {
+    pub async fn sessions(&self) -> Result<Page<SessionResponse>> {
         let route = routes::peer_sessions_list(&self.inner.workspace_id, &self.inner.id)?;
         pagination::paginate_post(&self.inner.http, &route, None, 1, 50, false).await
     }
@@ -653,7 +653,7 @@ impl Peer {
     pub async fn sessions_with_options(
         &self,
         options: &SessionListOptions,
-    ) -> Result<Page<Session>> {
+    ) -> Result<Page<SessionResponse>> {
         let route = routes::peer_sessions_list(&self.inner.workspace_id, &self.inner.id)?;
         let body = options
             .filters
@@ -663,7 +663,12 @@ impl Peer {
             });
         let body_val = body
             .as_ref()
-            .map(|b| serde_json::to_value(b).map_err(|e| HonchoError::Configuration(e.to_string())))
+            .map(|b| {
+                serde_json::to_value(b).map_err(|e| HonchoError::Serialization {
+                    path: "SessionGet".into(),
+                    source: e,
+                })
+            })
             .transpose()?;
         pagination::paginate_post(
             &self.inner.http,
@@ -708,11 +713,7 @@ impl Peer {
     /// ```no_run
     /// # async fn example(peer: &honcho_ai::Peer) -> honcho_ai::error::Result<()> {
     /// use honcho_ai::types::message::MessageSearchOptions;
-    /// let opts = MessageSearchOptions {
-    ///     query: "topic".into(),
-    ///     filters: None,
-    ///     limit: 20,
-    /// };
+    /// let opts = MessageSearchOptions::builder().query("topic").limit(20).build();
     /// let results = peer.search_with_options(&opts).await?;
     /// # Ok(())
     /// # }
@@ -1018,8 +1019,10 @@ impl ChatStreamBuilder {
                 Method::POST,
                 &route,
                 Some(
-                    &serde_json::to_value(&opts)
-                        .map_err(|e| HonchoError::Configuration(e.to_string()))?,
+                    &serde_json::to_value(&opts).map_err(|e| HonchoError::Serialization {
+                        path: "DialecticOptions".into(),
+                        source: e,
+                    })?,
                 ),
                 &[],
             )

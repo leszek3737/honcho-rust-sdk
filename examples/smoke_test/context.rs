@@ -5,14 +5,14 @@ use super::harness::TestReport;
 
 #[allow(clippy::similar_names, clippy::too_many_lines)]
 pub async fn run(honcho: &Honcho, report: &mut TestReport) {
-    let peer = match honcho.peer("ctx-peer", None, None).await {
+    let peer = match honcho.peer("ctx-peer").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("setup: create peer", &e.to_string());
             return;
         }
     };
-    let session = match honcho.session("ctx-sess", None, None, None).await {
+    let session = match honcho.session("ctx-sess").build().await {
         Ok(s) => s,
         Err(e) => {
             report.fail("setup: create session", &e.to_string());

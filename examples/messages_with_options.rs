@@ -19,8 +19,8 @@ async fn main() -> honcho_ai::error::Result<()> {
             .build(),
     )?;
 
-    let peer = honcho.peer("user-1", None, None).await?;
-    let session = honcho.session("sess-1", None, None, None).await?;
+    let peer = honcho.peer("user-1").build().await?;
+    let session = honcho.session("sess-1").build().await?;
 
     let mut meta = HashMap::new();
     meta.insert("tag".into(), "important".into());
@@ -43,11 +43,10 @@ async fn main() -> honcho_ai::error::Result<()> {
     let results = session.search("announcement").await?;
     println!("Search returned {} result(s)", results.len());
 
-    let search_opts = honcho_ai::types::message::MessageSearchOptions {
-        query: "important".into(),
-        filters: None,
-        limit: 5,
-    };
+    let search_opts = honcho_ai::types::message::MessageSearchOptions::builder()
+        .query("important")
+        .limit(5)
+        .build();
     let filtered = session.search_with_options(&search_opts).await?;
     println!("Filtered search returned {} result(s)", filtered.len());
 

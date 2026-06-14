@@ -9,7 +9,7 @@ use crate::session::PeerSpec;
 use crate::types::dream::QueueStatus;
 use crate::types::pagination::validate_pagination;
 use crate::types::peer::Peer as PeerResponse;
-use crate::types::session::Session as SessionResponse;
+use crate::types::session::SessionResponse;
 use crate::types::workspace::WorkspaceConfiguration;
 
 use super::Peer as BlockingPeer;
@@ -32,6 +32,7 @@ impl std::fmt::Debug for Honcho {
     }
 }
 
+#[bon::bon]
 impl Honcho {
     /// Create a blocking client pointed at `base_url` for `workspace_id`.
     ///
@@ -121,57 +122,87 @@ impl Honcho {
 
     /// Get or create a peer by ID.
     ///
+    /// Returns a builder; finish with `.build()`.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// let client = honcho_ai::blocking::Honcho::new("http://localhost:8000", "ws-1")?;
-    /// let peer = client.peer("alice", None, None)?;
+    /// let peer = client.peer("alice").build()?;
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
+    #[builder(finish_fn = build, on(String, into))]
     pub fn peer(
         &self,
-        id: impl Into<String>,
+        #[builder(start_fn)] id: String,
         metadata: Option<HashMap<String, Value>>,
-        configuration: Option<HashMap<String, Value>>,
+        #[builder(name = config)] configuration: Option<HashMap<String, Value>>,
     ) -> Result<BlockingPeer> {
-        block_on(self.inner.peer(id, metadata, configuration))?.map(BlockingPeer::new)
+        block_on(
+            self.inner
+                .peer(id)
+                .maybe_metadata(metadata)
+                .maybe_config(configuration)
+                .build(),
+        )?
+        .map(BlockingPeer::new)
     }
 
     /// Get or create a session by ID.
     ///
+    /// Returns a builder; finish with `.build()`.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// let client = honcho_ai::blocking::Honcho::new("http://localhost:8000", "ws-1")?;
-    /// let session = client.session("s-42", None, None, None)?;
+    /// let session = client.session("s-42").build()?;
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
+    #[builder(finish_fn = build, on(String, into))]
     pub fn session(
         &self,
-        id: impl Into<String>,
+        #[builder(start_fn)] id: String,
         metadata: Option<HashMap<String, Value>>,
         peers: Option<Vec<PeerSpec>>,
         configuration: Option<crate::SessionConfiguration>,
     ) -> Result<BlockingSession> {
-        block_on(self.inner.session(id, metadata, peers, configuration))?.map(BlockingSession::new)
+        block_on(
+            self.inner
+                .session(id)
+                .maybe_metadata(metadata)
+                .maybe_peers(peers)
+                .maybe_configuration(configuration)
+                .build(),
+        )?
+        .map(BlockingSession::new)
     }
 
     /// Search messages across the workspace.
+    ///
+    /// Returns a builder; finish with `.build()`. `limit` defaults to 10.
     ///
     /// # Examples
     ///
     /// ```no_run
     /// let client = honcho_ai::blocking::Honcho::new("http://localhost:8000", "ws-1")?;
-    /// let results = client.search("important topic", None, None)?;
+    /// let results = client.search("important topic").build()?;
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
+    #[builder(finish_fn = build, on(String, into))]
     pub fn search(
         &self,
-        query: &str,
-        limit: Option<u32>,
+        #[builder(start_fn)] query: String,
+        #[builder(default = 10)] limit: u32,
         filters: Option<HashMap<String, Value>>,
     ) -> Result<Vec<crate::Message>> {
-        block_on(self.inner.search(query, limit, filters))?
+        block_on(
+            self.inner
+                .search(query)
+                .limit(limit)
+                .maybe_filters(filters)
+                .build(),
+        )?
     }
 
     /// Refresh workspace state.
@@ -295,13 +326,22 @@ impl Honcho {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// use honcho_ai::types::common::ReasoningConfiguration;
+    /// use honcho_ai::types::workspace::WorkspaceConfiguration;
+    ///
     /// let client = honcho_ai::blocking::Honcho::new("http://localhost:8000", "ws-1")?;
-    /// let config = WorkspaceConfiguration {
-    ///     reasoning: Some(ReasoningConfiguration { enabled: Some(true), custom_instructions: None, ..Default::default() }),
-    ///     ..Default::default()
-    /// };
+    ///
+    /// // Both types are `#[non_exhaustive]`, so build from `Default` and set
+    /// // fields instead of using a struct literal / functional-update syntax.
+    /// let mut reasoning = ReasoningConfiguration::default();
+    /// reasoning.enabled = Some(true);
+    ///
+    /// let mut config = WorkspaceConfiguration::default();
+    /// config.reasoning = Some(reasoning);
+    ///
     /// client.set_configuration(&config)?;
+    /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn set_configuration(&self, config: &WorkspaceConfiguration) -> Result<()> {
         block_on(self.inner.set_configuration(config))?
@@ -359,24 +399,16 @@ impl Honcho {
         collect_pages(self.inner.peers())
     }
 
-    /// List peers with filters, collecting across pages.
+    /// List peers with filters. Returns a single paginated result.
     ///
     /// `page` is 1-based and `size` must be in `1..=100`; both are validated
     /// client-side before any network request and a violation returns
     /// [`HonchoError::Validation`](crate::error::HonchoError::Validation).
     ///
-    /// # Warning (collect-all behaviour — to be unified in PR6)
-    ///
-    /// Unlike the async
-    /// [`Honcho::peers_with_filters`](crate::Honcho::peers_with_filters), which
-    /// returns a single [`Page`](crate::types::pagination::Page), this blocking
-    /// method transparently fetches **all** pages starting from `page` until
-    /// the end of the workspace (capped at 1000 page requests by
-    /// `collect_all_pages`). The `page` and `size` parameters
-    /// therefore only bound the **first** fetch; the returned `Vec` contains
-    /// every matching peer from that page onward. If you only need one page,
-    /// use the async client. The return-shape parity fix is a breaking change
-    /// and is deferred to PR6.
+    /// Mirrors the async
+    /// [`Honcho::peers_with_filters`](crate::Honcho::peers_with_filters): it
+    /// returns the same single [`Page`](crate::types::pagination::Page) for the
+    /// requested `page`/`size`, not a collected `Vec`.
     ///
     /// # Examples
     ///
@@ -384,7 +416,7 @@ impl Honcho {
     /// let client = honcho_ai::blocking::Honcho::new("http://localhost:8000", "ws-1")?;
     /// let mut filters = std::collections::HashMap::new();
     /// filters.insert("role".into(), "admin".into());
-    /// let peers = client.peers_with_filters(filters, 1, 10, false)?;
+    /// let page = client.peers_with_filters(filters, 1, 10, false)?;
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn peers_with_filters(
@@ -393,12 +425,12 @@ impl Honcho {
         page: u64,
         size: u64,
         reverse: bool,
-    ) -> Result<Vec<PeerResponse>> {
+    ) -> Result<crate::types::pagination::Page<PeerResponse>> {
         // Validate before entering the runtime so an out-of-range `page`/`size`
         // fails fast with a `Validation` error instead of first triggering a
         // lazy `ensure_workspace` network round-trip inside the async client.
         validate_pagination(page, size)?;
-        collect_pages(self.inner.peers_with_filters(filters, page, size, reverse))
+        block_on(self.inner.peers_with_filters(filters, page, size, reverse))?
     }
 
     /// List all sessions in the workspace, collecting across pages.
@@ -417,24 +449,16 @@ impl Honcho {
         collect_pages(self.inner.sessions())
     }
 
-    /// List sessions with filters, collecting across pages.
+    /// List sessions with filters. Returns a single paginated result.
     ///
     /// `page` is 1-based and `size` must be in `1..=100`; both are validated
     /// client-side before any network request and a violation returns
     /// [`HonchoError::Validation`](crate::error::HonchoError::Validation).
     ///
-    /// # Warning (collect-all behaviour — to be unified in PR6)
-    ///
-    /// Unlike the async
-    /// [`Honcho::sessions_with_filters`](crate::Honcho::sessions_with_filters),
-    /// which returns a single [`Page`](crate::types::pagination::Page), this
-    /// blocking method transparently fetches **all** pages starting from
-    /// `page` until the end of the workspace (capped at 1000 page requests by
-    /// `collect_all_pages`). The `page` and `size` parameters
-    /// therefore only bound the **first** fetch; the returned `Vec` contains
-    /// every matching session from that page onward. If you only need one
-    /// page, use the async client. The return-shape parity fix is a breaking
-    /// change and is deferred to PR6.
+    /// Mirrors the async
+    /// [`Honcho::sessions_with_filters`](crate::Honcho::sessions_with_filters):
+    /// it returns the same single [`Page`](crate::types::pagination::Page) for
+    /// the requested `page`/`size`, not a collected `Vec`.
     ///
     /// # Examples
     ///
@@ -442,7 +466,7 @@ impl Honcho {
     /// let client = honcho_ai::blocking::Honcho::new("http://localhost:8000", "ws-1")?;
     /// let mut filters = std::collections::HashMap::new();
     /// filters.insert("is_active".into(), true.into());
-    /// let sessions = client.sessions_with_filters(filters, 1, 10, false)?;
+    /// let page = client.sessions_with_filters(filters, 1, 10, false)?;
     /// # Ok::<(), honcho_ai::error::HonchoError>(())
     /// ```
     pub fn sessions_with_filters(
@@ -451,15 +475,15 @@ impl Honcho {
         page: u64,
         size: u64,
         reverse: bool,
-    ) -> Result<Vec<SessionResponse>> {
+    ) -> Result<crate::types::pagination::Page<SessionResponse>> {
         // Validate before entering the runtime so an out-of-range `page`/`size`
         // fails fast with a `Validation` error instead of first triggering a
         // lazy `ensure_workspace` network round-trip inside the async client.
         validate_pagination(page, size)?;
-        collect_pages(
+        block_on(
             self.inner
                 .sessions_with_filters(filters, page, size, reverse),
-        )
+        )?
     }
 
     /// List all workspace IDs, collecting across pages.

@@ -17,7 +17,7 @@ use crate::session::{PeerSpec, Session};
 use crate::types::dream::QueueStatus;
 use crate::types::message::MessageResponse;
 use crate::types::peer::Peer as PeerResponse;
-use crate::types::session::Session as SessionResponse;
+use crate::types::session::SessionResponse;
 use crate::types::workspace::{Workspace, WorkspaceConfiguration};
 
 /// API environment.
@@ -109,6 +109,7 @@ pub struct HonchoParams {
     default_query: Option<Vec<(String, String)>>,
 }
 
+#[bon::bon]
 impl Honcho {
     /// Quick constructor pointing at `base_url` for `workspace_id`.
     ///
@@ -343,12 +344,24 @@ impl Honcho {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let config = WorkspaceConfiguration {
-    ///     reasoning: Some(ReasoningConfiguration { enabled: Some(true), custom_instructions: None, ..Default::default() }),
-    ///     ..Default::default()
-    /// };
+    /// ```no_run
+    /// # async fn example() -> honcho_ai::error::Result<()> {
+    /// use honcho_ai::types::common::ReasoningConfiguration;
+    /// use honcho_ai::types::workspace::WorkspaceConfiguration;
+    ///
+    /// let client = honcho_ai::Honcho::new("http://localhost:8000", "ws-1")?;
+    ///
+    /// // Both types are `#[non_exhaustive]`, so build from `Default` and set
+    /// // fields instead of using a struct literal / functional-update syntax.
+    /// let mut reasoning = ReasoningConfiguration::default();
+    /// reasoning.enabled = Some(true);
+    ///
+    /// let mut config = WorkspaceConfiguration::default();
+    /// config.reasoning = Some(reasoning);
+    ///
     /// client.set_configuration(&config).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// Unlike the read operations (e.g.
@@ -357,8 +370,12 @@ impl Honcho {
     /// fails with a 404 if it was deleted server-side.
     pub async fn set_configuration(&self, config: &WorkspaceConfiguration) -> Result<()> {
         let body = crate::types::workspace::WorkspaceConfigurationSet {
-            configuration: serde_json::to_value(config)
-                .map_err(|e| HonchoError::Configuration(e.to_string()))?,
+            configuration: serde_json::to_value(config).map_err(|e| {
+                HonchoError::Serialization {
+                    path: "WorkspaceConfiguration".into(),
+                    source: e,
+                }
+            })?,
         };
         let _: Workspace = self
             .inner
@@ -417,30 +434,32 @@ impl Honcho {
 
     /// Get or create a peer by ID.
     ///
+    /// Returns a builder; finish with `.build().await`.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// # async fn example() -> honcho_ai::error::Result<()> {
     /// let client = honcho_ai::Honcho::new("http://localhost:8000", "ws-1")?;
-    ///     let peer = client.peer("alice", None, None).await?;
+    /// let peer = client.peer("alice").build().await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[builder(finish_fn = build, on(String, into))]
     pub async fn peer(
         &self,
-        id: impl Into<String>,
+        #[builder(start_fn)] id: String,
         metadata: Option<HashMap<String, Value>>,
-        configuration: Option<HashMap<String, Value>>,
+        #[builder(name = config)] configuration: Option<HashMap<String, Value>>,
     ) -> Result<Peer> {
-        let peer_id: String = id.into();
-        if peer_id.is_empty() {
+        if id.is_empty() {
             return Err(HonchoError::Configuration(
                 "peer_id must not be empty".into(),
             ));
         }
         self.ensure_workspace().await?;
         let body = crate::types::peer::PeerCreate {
-            id: peer_id,
+            id,
             metadata,
             configuration,
         };
@@ -454,24 +473,26 @@ impl Honcho {
 
     /// Get or create a session by ID.
     ///
+    /// Returns a builder; finish with `.build().await`.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// # async fn example() -> honcho_ai::error::Result<()> {
     /// let client = honcho_ai::Honcho::new("http://localhost:8000", "ws-1")?;
-    ///     let session = client.session("s-42", None, None, None).await?;
+    /// let session = client.session("s-42").build().await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[builder(finish_fn = build, on(String, into))]
     pub async fn session(
         &self,
-        id: impl Into<String>,
+        #[builder(start_fn)] id: String,
         metadata: Option<HashMap<String, Value>>,
         peers: Option<Vec<PeerSpec>>,
         configuration: Option<crate::SessionConfiguration>,
     ) -> Result<Session> {
-        let session_id: String = id.into();
-        if session_id.is_empty() {
+        if id.is_empty() {
             return Err(HonchoError::Configuration(
                 "session_id must not be empty".into(),
             ));
@@ -496,7 +517,7 @@ impl Honcho {
                 .collect()
         });
         let body = crate::types::session::SessionCreate {
-            id: session_id,
+            id,
             metadata,
             peers: peers_map,
             configuration,
@@ -538,25 +559,28 @@ impl Honcho {
 
     /// Search messages across the workspace.
     ///
+    /// Returns a builder; finish with `.build().await`. `limit` defaults to 10.
+    ///
     /// # Examples
     ///
     /// ```no_run
     /// # async fn example() -> honcho_ai::error::Result<()> {
     /// let client = honcho_ai::Honcho::new("http://localhost:8000", "ws-1")?;
-    /// let results = client.search("important topic", None, None).await?;
+    /// let results = client.search("important topic").build().await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[builder(finish_fn = build, on(String, into))]
     pub async fn search(
         &self,
-        query: &str,
-        limit: Option<u32>,
+        #[builder(start_fn)] query: String,
+        #[builder(default = 10)] limit: u32,
         filters: Option<HashMap<String, Value>>,
     ) -> Result<Vec<crate::Message>> {
         self.ensure_workspace().await?;
         let body = crate::types::workspace::WorkspaceSearchRequest {
-            query: query.to_owned(),
-            limit: limit.unwrap_or(10),
+            query,
+            limit,
             filters,
         };
         let responses: Vec<MessageResponse> = self
@@ -750,8 +774,10 @@ impl Honcho {
         let body = crate::types::peer::PeerGet {
             filters: Some(filters),
         };
-        let body_val =
-            serde_json::to_value(&body).map_err(|e| HonchoError::Configuration(e.to_string()))?;
+        let body_val = serde_json::to_value(&body).map_err(|e| HonchoError::Serialization {
+            path: "PeerGet".into(),
+            source: e,
+        })?;
         self.list(
             &routes::peers_list(&self.inner.workspace_id)?,
             Some(&body_val),
@@ -780,7 +806,7 @@ impl Honcho {
     /// ```
     pub async fn sessions(
         &self,
-    ) -> Result<crate::types::pagination::Page<crate::types::session::Session>> {
+    ) -> Result<crate::types::pagination::Page<crate::types::session::SessionResponse>> {
         self.list(
             &routes::sessions_list(&self.inner.workspace_id)?,
             None,
@@ -812,12 +838,14 @@ impl Honcho {
         page: u64,
         size: u64,
         reverse: bool,
-    ) -> Result<crate::types::pagination::Page<crate::types::session::Session>> {
+    ) -> Result<crate::types::pagination::Page<crate::types::session::SessionResponse>> {
         let body = crate::types::session::SessionGet {
             filters: Some(filters),
         };
-        let body_val =
-            serde_json::to_value(&body).map_err(|e| HonchoError::Configuration(e.to_string()))?;
+        let body_val = serde_json::to_value(&body).map_err(|e| HonchoError::Serialization {
+            path: "SessionGet".into(),
+            source: e,
+        })?;
         self.list(
             &routes::sessions_list(&self.inner.workspace_id)?,
             Some(&body_val),
@@ -1001,9 +1029,9 @@ mod tests {
             .await;
 
         let client = client_no_env_key(&server.uri());
-        client.peer("alice", None, None).await.unwrap(); // ensure POST #1
+        client.peer("alice").build().await.unwrap(); // ensure POST #1
         client.delete_workspace("ws-1").await.unwrap(); // resets cache
-        client.peer("bob", None, None).await.unwrap(); // ensure POST #2
+        client.peer("bob").build().await.unwrap(); // ensure POST #2
 
         let hits = ensure_hits(&server).await;
         assert!(
@@ -1033,9 +1061,9 @@ mod tests {
             .await;
 
         let client = client_no_env_key(&server.uri());
-        client.peer("alice", None, None).await.unwrap(); // ensure POST #1
+        client.peer("alice").build().await.unwrap(); // ensure POST #1
         client.delete_workspace("other-ws").await.unwrap(); // unrelated, no reset
-        client.peer("bob", None, None).await.unwrap(); // cache hit, no POST #2
+        client.peer("bob").build().await.unwrap(); // cache hit, no POST #2
 
         assert_eq!(
             ensure_hits(&server).await,

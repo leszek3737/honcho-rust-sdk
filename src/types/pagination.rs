@@ -559,3 +559,291 @@ pub(crate) fn validate_pagination(page: u64, size: u64) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! `paginate_post` / `validate_pagination` smoke tests (formerly the
+    //! `F3.4.3` section of `tests/pagination.rs`). Recovered inline because the
+    //! cases build an [`HttpClient`] from the now-`pub(crate)` `http` module and
+    //! can no longer live in an external test crate.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{Page, paginate_post};
+    use crate::error::HonchoError;
+    use crate::http::client::HttpClient;
+    use crate::types::peer::Peer;
+
+    fn peer_json(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "workspace_id": "ws1",
+            "created_at": "2025-01-15T10:30:00Z",
+            "metadata": {},
+            "configuration": {}
+        })
+    }
+
+    fn page_json(
+        item_ids: &[&str],
+        total: u64,
+        page: u64,
+        size: u64,
+        pages: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "items": item_ids.iter().map(|id| peer_json(id)).collect::<Vec<_>>(),
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": pages
+        })
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // F3.4.3 — paginate_post smoke tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn paginate_post_returns_first_page() {
+        use wiremock::matchers::{body_json, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+
+        let page1_body = page_json(&["alice", "bob"], 5, 1, 2, 3);
+        let request_body = serde_json::json!({"filter": true});
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/peers/list"))
+            .and(query_param("page", "1"))
+            .and(query_param("size", "2"))
+            .and(body_json(&request_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1_body))
+            .mount(&server)
+            .await;
+
+        let page: Page<Peer> = paginate_post(
+            &http,
+            "/v3/workspaces/ws1/peers/list",
+            Some(&request_body),
+            1,
+            2,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.items().len(), 2);
+        assert_eq!(page.total(), 5);
+        assert_eq!(page.page(), 1);
+        assert_eq!(page.pages(), 3);
+        assert!(page.has_next());
+    }
+
+    #[tokio::test]
+    async fn paginate_post_next_page_auto_fetches() {
+        use wiremock::matchers::{body_json, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+
+        let page1_body = page_json(&["alice", "bob"], 5, 1, 2, 3);
+        let page2_body = page_json(&["carol", "dave"], 5, 2, 2, 3);
+        let request_body = serde_json::json!({});
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/peers/list"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1_body))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/peers/list"))
+            .and(query_param("page", "2"))
+            .and(body_json(&request_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2_body))
+            .mount(&server)
+            .await;
+
+        let page1: Page<Peer> = paginate_post(
+            &http,
+            "/v3/workspaces/ws1/peers/list",
+            Some(&request_body),
+            1,
+            2,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page1.items()[0].id, "alice");
+
+        let page2 = page1
+            .next_page()
+            .await
+            .unwrap()
+            .expect("page 2 should exist");
+        assert_eq!(page2.items().len(), 2);
+        assert_eq!(page2.page(), 2);
+        assert_eq!(page2.items()[0].id, "carol");
+        assert!(page2.has_next());
+    }
+
+    #[tokio::test]
+    async fn paginate_post_with_reverse_param() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+
+        let page1_body = page_json(&["zoe"], 1, 1, 2, 1);
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/peers/list"))
+            .and(query_param("page", "1"))
+            .and(query_param("size", "2"))
+            .and(query_param("reverse", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1_body))
+            .mount(&server)
+            .await;
+
+        let page: Page<Peer> =
+            paginate_post(&http, "/v3/workspaces/ws1/peers/list", None, 1, 2, true)
+                .await
+                .unwrap();
+
+        assert_eq!(page.items()[0].id, "zoe");
+        assert!(!page.has_next());
+    }
+
+    #[tokio::test]
+    async fn paginate_post_sends_page_one_size_one_query() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+
+        let page_body = page_json(&["alice"], 1, 1, 1, 1);
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/peers/list"))
+            .and(query_param("page", "1"))
+            .and(query_param("size", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let page: Page<Peer> =
+            paginate_post(&http, "/v3/workspaces/ws1/peers/list", None, 1, 1, false)
+                .await
+                .unwrap();
+
+        assert_eq!(page.items()[0].id, "alice");
+        assert_eq!(page.page(), 1);
+        assert_eq!(page.size(), 1);
+    }
+
+    #[tokio::test]
+    async fn paginate_post_rejects_invalid_page_and_size_before_request() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+
+        for (page, size) in [(0, 50), (1, 0), (1, 101)] {
+            let err = paginate_post::<Peer>(
+                &http,
+                "/v3/workspaces/ws1/peers/list",
+                None,
+                page,
+                size,
+                false,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, HonchoError::Validation(_)));
+        }
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests.is_empty(),
+            "invalid pagination should not send requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn paginate_post_allows_large_page_and_size_100() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let http = HttpClient::from_params(
+            HttpClient::builder()
+                .base_url(server.uri())
+                .max_retries(0)
+                .build(),
+        )
+        .unwrap();
+
+        let page_body = page_json(&[], 0, 9999, 100, 0);
+
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/peers/list"))
+            .and(query_param("page", "9999"))
+            .and(query_param("size", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let page: Page<Peer> = paginate_post(
+            &http,
+            "/v3/workspaces/ws1/peers/list",
+            None,
+            9999,
+            100,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.page(), 9999);
+        assert_eq!(page.size(), 100);
+    }
+}

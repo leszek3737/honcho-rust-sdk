@@ -11,21 +11,21 @@ use std::collections::HashMap;
     clippy::too_many_lines
 )]
 pub async fn run(honcho: &Honcho, report: &mut TestReport) -> honcho_ai::error::Result<()> {
-    let peer1 = match honcho.peer("sess-peer-1", None, None).await {
+    let peer1 = match honcho.peer("sess-peer-1").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("session_setup_peers", &e.to_string());
             return Err(e);
         }
     };
-    let peer2 = match honcho.peer("sess-peer-2", None, None).await {
+    let peer2 = match honcho.peer("sess-peer-2").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("session_setup_peers", &e.to_string());
             return Err(e);
         }
     };
-    let session = match honcho.session("sess-test-1", None, None, None).await {
+    let session = match honcho.session("sess-test-1").build().await {
         Ok(s) => s,
         Err(e) => {
             report.fail("session_setup_session", &e.to_string());
@@ -174,7 +174,7 @@ pub async fn run(honcho: &Honcho, report: &mut TestReport) -> honcho_ai::error::
     }
 
     {
-        let tmp = match honcho.session("sess-tmp-delete", None, None, None).await {
+        let tmp = match honcho.session("sess-tmp-delete").build().await {
             Ok(s) => s,
             Err(e) => {
                 report.fail("session_delete", &format!("create temp: {e}"));

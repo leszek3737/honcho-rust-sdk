@@ -51,7 +51,8 @@ pub struct PeerCreate {
 /// If both `metadata` and `configuration` are `None`, the request body
 /// serializes to `{}`. The server will either perform a silent no-op or
 /// return an error. Ensure at least one field is `Some` before sending.
-/// Compile-time enforcement of this constraint is deferred to PR6.
+/// Compile-time enforcement of this constraint is deferred to a future major
+/// release.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[builder(on(String, into))]
@@ -112,7 +113,7 @@ pub struct PeerConfig {
 /// To avoid accidental data loss, read the current configuration first and
 /// merge the desired changes before calling
 /// [`set_configuration`](crate::Peer::set_configuration).
-/// Merge / read-modify-write helpers are deferred to PR6.
+/// Merge / read-modify-write helpers are deferred to a future major release.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PeerConfigurationSet {
@@ -203,7 +204,7 @@ pub struct PeerRepresentationGet {
 /// will compare as unequal. Avoid relying on `==` when the distance field
 /// may hold `NaN`; write a custom comparator if structural equality is
 /// required. Deriving `Eq` requires a validated newtype and is deferred
-/// to PR6.
+/// to a future major release.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
 #[builder(on(String, into))]

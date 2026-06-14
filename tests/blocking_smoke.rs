@@ -175,7 +175,7 @@ async fn blocking_session_context() {
     let uri = server.uri();
     let ctx = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.context().unwrap()
     });
     assert_eq!(ctx.id, "sess1");
@@ -200,7 +200,7 @@ async fn blocking_session_context_with_options() {
     let uri = server.uri();
     let ctx = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         let opts = honcho_ai::types::session::SessionContextOptions::builder()
             .summary(false)
             .limit_to_session(true)
@@ -236,7 +236,7 @@ async fn blocking_session_context_builder() {
     let uri = server.uri();
     let ctx = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session
             .context_builder()
             .summary(false)
@@ -283,7 +283,7 @@ async fn blocking_session_summaries() {
     let uri = server.uri();
     let summaries = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.summaries().unwrap()
     });
     assert_eq!(summaries.id, "sess1");
@@ -313,7 +313,7 @@ async fn blocking_session_search() {
     let uri = server.uri();
     let results = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.search("hello").unwrap()
     });
     assert_eq!(results.len(), 1);
@@ -340,13 +340,14 @@ async fn blocking_session_search_with_options() {
     let uri = server.uri();
     let results = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session
-            .search_with_options(&MessageSearchOptions {
-                query: "hello".into(),
-                filters: None,
-                limit: 20,
-            })
+            .search_with_options(
+                &MessageSearchOptions::builder()
+                    .query("hello")
+                    .limit(20)
+                    .build(),
+            )
             .unwrap()
     });
     assert_eq!(results.len(), 1);
@@ -373,7 +374,7 @@ async fn blocking_session_representation() {
     let uri = server.uri();
     let rep = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.representation("alice").unwrap()
     });
     assert_eq!(rep, "Alice likes Rust");
@@ -398,7 +399,7 @@ async fn blocking_session_queue_status() {
     let uri = server.uri();
     let status = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.queue_status(None, None).unwrap()
     });
     assert_eq!(status.total_work_units, 5);
@@ -431,7 +432,7 @@ async fn blocking_session_messages() {
     let uri = server.uri();
     let msgs = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.messages().unwrap()
     });
     assert_eq!(msgs.len(), 1);
@@ -460,7 +461,7 @@ async fn blocking_peer_search() {
     let uri = server.uri();
     let results = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.search("hello").unwrap()
     });
     assert_eq!(results.len(), 1);
@@ -486,12 +487,13 @@ async fn blocking_peer_search_with_options() {
     let uri = server.uri();
     let results = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
-        peer.search_with_options(&MessageSearchOptions {
-            query: "hello".into(),
-            filters: None,
-            limit: 25,
-        })
+        let peer = client.peer("alice").build().unwrap();
+        peer.search_with_options(
+            &MessageSearchOptions::builder()
+                .query("hello")
+                .limit(25)
+                .build(),
+        )
         .unwrap()
     });
     assert_eq!(results.len(), 1);
@@ -520,7 +522,7 @@ async fn blocking_peer_context() {
     let uri = server.uri();
     let ctx = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.context().unwrap()
     });
     assert_eq!(ctx.peer_id, "alice");
@@ -548,7 +550,7 @@ async fn blocking_peer_context_with_target() {
     let uri = server.uri();
     let ctx = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.context_builder().target("bob").send().unwrap()
     });
     assert_eq!(ctx.target_id, "bob");
@@ -580,7 +582,7 @@ async fn blocking_peer_sessions() {
     let uri = server.uri();
     let sessions = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.sessions().unwrap()
     });
     assert_eq!(sessions.len(), 1);
@@ -608,7 +610,7 @@ async fn blocking_peer_representation() {
     let uri = server.uri();
     let rep = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.representation().unwrap()
     });
     assert_eq!(rep, "Alice likes cats");
@@ -639,7 +641,7 @@ async fn blocking_peer_representation_builder_with_options() {
     let uri = server.uri();
     let rep = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.representation_builder()
             .search_query("hobbies")
             .search_top_k(10)
@@ -722,7 +724,7 @@ async fn blocking_client_search() {
     let uri = server.uri();
     let results = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        client.search("hello", None, None).unwrap()
+        client.search("hello").build().unwrap()
     });
     assert_eq!(results.len(), 1);
 }
@@ -805,8 +807,8 @@ async fn blocking_client_peers_with_filters() {
             .peers_with_filters(std::collections::HashMap::new(), 1, 10, false)
             .unwrap()
     });
-    assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].id, "alice");
+    assert_eq!(peers.items().len(), 1);
+    assert_eq!(peers.items()[0].id, "alice");
 }
 
 // ─── Client: sessions_with_filters ───────────────────────────────────
@@ -838,8 +840,8 @@ async fn blocking_client_sessions_with_filters() {
             .sessions_with_filters(std::collections::HashMap::new(), 1, 10, false)
             .unwrap()
     });
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].id, "sess1");
+    assert_eq!(sessions.items().len(), 1);
+    assert_eq!(sessions.items()[0].id, "sess1");
 }
 
 // ─── Client: workspaces ──────────────────────────────────────────────
@@ -885,7 +887,7 @@ async fn blocking_session_search_validates_empty() {
     let uri = server.uri();
     let err = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         session.search("").unwrap_err()
     });
     assert_eq!(err.code(), "validation_error");
@@ -903,7 +905,7 @@ async fn blocking_peer_search_validates_empty() {
     let uri = server.uri();
     let err = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.search("").unwrap_err()
     });
     assert_eq!(err.code(), "validation_error");
@@ -1039,7 +1041,7 @@ async fn blocking_conclusion_query() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         let scope = peer.conclusions();
         let results = scope.query("test query").top_k(5).send().unwrap();
         assert_eq!(results.len(), 2);
@@ -1071,7 +1073,7 @@ async fn blocking_conclusion_list() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         let scope = peer.conclusions();
         let page = scope.list().send().unwrap();
         assert_eq!(page.items().len(), 1);
@@ -1095,7 +1097,7 @@ async fn blocking_conclusion_delete() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         let scope = peer.conclusions();
         scope.delete("c1").unwrap();
     });
@@ -1127,7 +1129,7 @@ async fn blocking_session_clone() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         let cloned = session.clone_session().unwrap();
         assert_eq!(cloned.id(), "sess1-clone");
     });
@@ -1158,7 +1160,7 @@ async fn blocking_session_clone_with_message() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         let cloned = session.clone_session_with_message("msg1").unwrap();
         assert_eq!(cloned.id(), "sess1-clone");
     });
@@ -1183,7 +1185,7 @@ async fn blocking_session_representation_builder() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         let rep = session
             .representation_builder("alice")
             .search_query("hobbies")
@@ -1211,7 +1213,7 @@ async fn blocking_peer_set_configuration_raw() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         let mut config = std::collections::HashMap::new();
         config.insert("custom".into(), serde_json::json!(42));
         peer.set_configuration_raw(config).unwrap();
@@ -1235,7 +1237,7 @@ async fn blocking_peer_update() {
     let uri = server.uri();
     blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         let mut meta = std::collections::HashMap::new();
         meta.insert("role".into(), serde_json::json!("admin"));
         peer.update(meta).unwrap();
@@ -1275,7 +1277,7 @@ async fn blocking_upload_file_streamed_from_sync_thread_succeeds() {
     let payload_for_thread = payload.clone();
     let msgs = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         let cursor = std::io::Cursor::new(payload_for_thread);
         session
             .upload_file_streamed("doc.txt", cursor, "text/plain")
@@ -1312,7 +1314,7 @@ async fn blocking_upload_file_streamed_truncated_reader_surfaces_io_err() {
     let uri = server.uri();
     let err = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         // Reader: yields 4 bytes of data, then returns a permanent io::Error.
         let reader = FailingReader::new(b"data".to_vec(), 4);
         session
@@ -1362,7 +1364,7 @@ async fn blocking_upload_file_streamed_joins_reader_thread_on_early_error() {
         s.spawn(move || -> (honcho_ai::error::Result<Vec<honcho_ai::Message>>, std::time::Duration, bool, usize) {
             // Plain OS thread, no tokio runtime: Honcho/session/upload setup works.
             let client = Honcho::new(&uri, "ws1").unwrap();
-            let session = client.session("sess1", None, None, None).unwrap();
+            let session = client.session("sess1").build().unwrap();
             let reader = SlowFiniteReader::new(
                 counter_for_thread,
                 dropped_for_thread,
@@ -1463,7 +1465,7 @@ async fn blocking_chat_stream_iterator_next_from_async_returns_configuration_err
     // Build the iterator from a sync thread (no runtime → send() works).
     let mut iter = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let peer = client.peer("alice", None, None).unwrap();
+        let peer = client.peer("alice").build().unwrap();
         peer.chat_stream("hi").send().unwrap()
     });
 
@@ -1524,7 +1526,7 @@ async fn blocking_upload_file_streamed_reader_panic_wins_over_send_error() {
     let uri = server.uri();
     let err = blocking(move || {
         let client = Honcho::new(&uri, "ws1").unwrap();
-        let session = client.session("sess1", None, None, None).unwrap();
+        let session = client.session("sess1").build().unwrap();
         let reader = PanickingReader::new(8);
         // The reader thread's unwind prints to stderr via the default panic
         // hook; that's expected noise for this test. The payload is captured

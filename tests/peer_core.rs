@@ -70,7 +70,7 @@ async fn make_peer(server: &MockServer) -> Peer {
         .await;
 
     let honcho = make_honcho(server);
-    honcho.peer("alice", None, None).await.unwrap()
+    honcho.peer("alice").build().await.unwrap()
 }
 
 // ── F5.1: Construction + Metadata ──────────────────────────────────────

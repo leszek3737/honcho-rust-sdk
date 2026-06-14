@@ -41,7 +41,7 @@ async fn make_session(server: &MockServer) -> honcho_ai::Session {
         .await;
 
     let honcho = Honcho::new(&server.uri(), "ws1").unwrap();
-    honcho.session("sess1", None, None, None).await.unwrap()
+    honcho.session("sess1").build().await.unwrap()
 }
 
 // --- Empty vec add_messages (early return) ---

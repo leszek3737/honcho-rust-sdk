@@ -13,7 +13,7 @@ use crate::http::client::HttpClient;
 use crate::http::routes;
 use crate::message::Message;
 use crate::types::message::MessageResponse;
-use crate::types::session::Session as SessionResponse;
+use crate::types::session::SessionResponse;
 use crate::types::session::{
     SessionConfiguration, SessionConfigurationSet, SessionPeerConfig, SessionUpdate,
 };
@@ -106,6 +106,12 @@ impl From<&crate::Peer> for PeerSpec {
     }
 }
 
+impl From<crate::Peer> for PeerSpec {
+    fn from(p: crate::Peer) -> Self {
+        Self::Id(p.id().to_owned())
+    }
+}
+
 impl From<(String, SessionPeerConfig)> for PeerSpec {
     fn from((id, cfg): (String, SessionPeerConfig)) -> Self {
         Self::WithConfig(id, cfg)
@@ -115,6 +121,27 @@ impl From<(String, SessionPeerConfig)> for PeerSpec {
 impl From<(&str, SessionPeerConfig)> for PeerSpec {
     fn from((id, cfg): (&str, SessionPeerConfig)) -> Self {
         Self::WithConfig(id.to_owned(), cfg)
+    }
+}
+
+impl From<(&crate::Peer, SessionPeerConfig)> for PeerSpec {
+    fn from((p, cfg): (&crate::Peer, SessionPeerConfig)) -> Self {
+        Self::WithConfig(p.id().to_owned(), cfg)
+    }
+}
+
+impl PeerSpec {
+    /// Decompose into `(peer_id, config)`.
+    ///
+    /// The bare-ID variant ([`PeerSpec::Id`]) yields a default
+    /// [`SessionPeerConfig`] (all observation settings unset), so callers can
+    /// treat both variants uniformly without re-matching.
+    #[must_use]
+    pub fn into_parts(self) -> (String, SessionPeerConfig) {
+        match self {
+            Self::Id(id) => (id, SessionPeerConfig::default()),
+            Self::WithConfig(id, cfg) => (id, cfg),
+        }
     }
 }
 
@@ -139,8 +166,10 @@ fn serialize_upload_fields(
         .metadata
         .as_ref()
         .map(|md| {
-            serde_json::to_string(md)
-                .map_err(|e| HonchoError::Configuration(format!("metadata: {e}")))
+            serde_json::to_string(md).map_err(|e| HonchoError::Serialization {
+                path: "MessageUploadFormMetadata".into(),
+                source: e,
+            })
         })
         .transpose()?;
 
@@ -148,8 +177,10 @@ fn serialize_upload_fields(
         .configuration
         .as_ref()
         .map(|cfg| {
-            serde_json::to_string(cfg)
-                .map_err(|e| HonchoError::Configuration(format!("configuration: {e}")))
+            serde_json::to_string(cfg).map_err(|e| HonchoError::Serialization {
+                path: "MessageUploadFormConfiguration".into(),
+                source: e,
+            })
         })
         .transpose()?;
 
@@ -519,8 +550,8 @@ impl Session {
     /// # }
     /// ```
     #[must_use]
-    pub fn created_at(&self) -> &DateTime<Utc> {
-        &self.inner.created_at
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.inner.created_at
     }
 
     // ── F6.1: Refresh / Metadata / Configuration CRUD ──────────────────
@@ -874,7 +905,7 @@ impl Session {
     ///
     /// ```no_run
     /// # async fn example(client: &honcho_ai::Honcho, session: &honcho_ai::Session) -> honcho_ai::error::Result<()> {
-    /// let peer = client.peer("alice", None, None).await?;
+    /// let peer = client.peer("alice").build().await?;
     /// let msg = peer.message("Hello!").build()?;
     /// let messages = session.add_messages(vec![msg]).await?;
     /// # Ok(())
@@ -975,8 +1006,10 @@ impl Session {
         let route = routes::messages_list(&self.inner.workspace_id, &self.inner.id)?;
         let body = filters
             .map(|f| {
-                serde_json::to_value(f)
-                    .map_err(|e| HonchoError::Configuration(format!("filters: {e}")))
+                serde_json::to_value(f).map_err(|e| HonchoError::Serialization {
+                    path: "MessageGet".into(),
+                    source: e,
+                })
             })
             .transpose()?;
         let result: crate::types::pagination::Page<MessageResponse> =
@@ -1296,7 +1329,7 @@ impl Session {
     /// ```no_run
     /// # async fn example(session: &honcho_ai::Session) -> honcho_ai::error::Result<()> {
     /// use honcho_ai::types::message::MessageSearchOptions;
-    /// let opts = MessageSearchOptions { query: "topic".into(), filters: None, limit: 20 };
+    /// let opts = MessageSearchOptions::builder().query("topic").limit(20).build();
     /// let results = session.search_with_options(&opts).await?;
     /// # Ok(())
     /// # }
@@ -1683,20 +1716,12 @@ fn normalize_peers(
 
     let mut map = serde_json::Map::new();
     for s in specs {
-        // Destructure by value so the id is owned (no extra clone) and the config
-        // is taken directly instead of being re-derived per match arm.
-        let (id, cfg) = match s.into() {
-            PeerSpec::Id(id) => (
-                id,
-                SessionPeerConfig {
-                    observe_me: None,
-                    observe_others: None,
-                },
-            ),
-            PeerSpec::WithConfig(id, cfg) => (id, cfg),
-        };
-        let val = serde_json::to_value(&cfg).map_err(|e| {
-            HonchoError::Configuration(format!("failed to serialize peer config for {id}: {e}"))
+        // Decompose by value: the id is owned (no extra clone) and the config is
+        // taken directly, defaulting for the bare-ID variant.
+        let (id, cfg) = s.into().into_parts();
+        let val = serde_json::to_value(&cfg).map_err(|e| HonchoError::Serialization {
+            path: "SessionPeerConfig".into(),
+            source: e,
         })?;
         // Reject duplicate IDs instead of letting a later entry silently clobber
         // an earlier one. The Entry API does a single lookup for both the
@@ -1724,7 +1749,7 @@ mod tests {
 
     use super::*;
     use crate::http::client::HttpClient;
-    use crate::types::session::Session as SessionResponse;
+    use crate::types::session::SessionResponse;
     use chrono::TimeZone;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

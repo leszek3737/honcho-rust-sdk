@@ -13,7 +13,7 @@ pub async fn run(honcho: &Honcho, report: &mut TestReport) {
     report.scenario("peer");
 
     let name = "peer_create";
-    let peer = match honcho.peer("smoke-peer-1", None, None).await {
+    let peer = match honcho.peer("smoke-peer-1").build().await {
         Ok(p) => {
             report.pass(name);
             p
@@ -35,7 +35,9 @@ pub async fn run(honcho: &Honcho, report: &mut TestReport) {
     let mut metadata_map = HashMap::new();
     metadata_map.insert("role".into(), json!("tester"));
     match honcho
-        .peer("smoke-peer-2", Some(metadata_map.clone()), None)
+        .peer("smoke-peer-2")
+        .metadata(metadata_map.clone())
+        .build()
         .await
     {
         Ok(_p2) => report.pass(name),

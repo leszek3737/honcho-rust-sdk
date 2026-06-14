@@ -100,8 +100,8 @@ impl<S: Stream> Iterator for BlockingIter<S> {
 /// loops. The cap is checked **before** each network fetch: a server reporting
 /// more pages than the cap permits is never contacted for the page that would
 /// exceed it, and no page beyond the cap is fetched only to be discarded.
-// TODO(PR6): relocate to `Page::collect_all()` once the public-path change
-// is acceptable.
+// TODO: relocate to `Page::collect_all()` once the public-path change
+// becomes acceptable in a future major release.
 pub(crate) async fn collect_all_pages<TRaw, TOut>(
     first_page: crate::types::pagination::Page<TRaw, TOut>,
 ) -> crate::error::Result<Vec<TOut>>

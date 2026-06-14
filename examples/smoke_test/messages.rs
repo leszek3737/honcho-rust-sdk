@@ -13,14 +13,14 @@ use super::harness::TestReport;
 pub async fn run(honcho: &Honcho, report: &mut TestReport) {
     report.scenario("messages");
 
-    let peer = match honcho.peer("msg-peer", None, None).await {
+    let peer = match honcho.peer("msg-peer").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("setup_peer", &e.to_string());
             return;
         }
     };
-    let session = match honcho.session("msg-sess", None, None, None).await {
+    let session = match honcho.session("msg-sess").build().await {
         Ok(s) => s,
         Err(e) => {
             report.fail("setup_session", &e.to_string());
@@ -358,11 +358,10 @@ async fn test_session_search(session: &honcho_ai::Session, report: &TestReport) 
 }
 
 async fn test_session_search_with_options(session: &honcho_ai::Session, report: &TestReport) {
-    let opts = MessageSearchOptions {
-        query: "Hello".to_owned(),
-        filters: None,
-        limit: 5,
-    };
+    let opts = MessageSearchOptions::builder()
+        .query("Hello")
+        .limit(5)
+        .build();
     match session.search_with_options(&opts).await {
         Ok(results) => {
             let _ = results;
@@ -383,11 +382,10 @@ async fn test_peer_search(peer: &honcho_ai::Peer, report: &TestReport) {
 }
 
 async fn test_peer_search_with_options(peer: &honcho_ai::Peer, report: &TestReport) {
-    let opts = MessageSearchOptions {
-        query: "Hello".to_owned(),
-        filters: None,
-        limit: 5,
-    };
+    let opts = MessageSearchOptions::builder()
+        .query("Hello")
+        .limit(5)
+        .build();
     match peer.search_with_options(&opts).await {
         Ok(results) => {
             let _ = results;
@@ -398,7 +396,7 @@ async fn test_peer_search_with_options(peer: &honcho_ai::Peer, report: &TestRepo
 }
 
 async fn test_workspace_search(honcho: &Honcho, report: &TestReport) {
-    match honcho.search("Hello", None, None).await {
+    match honcho.search("Hello").build().await {
         Ok(results) => {
             let _ = results;
             report.pass("workspace_search");
@@ -408,7 +406,7 @@ async fn test_workspace_search(honcho: &Honcho, report: &TestReport) {
 }
 
 async fn test_workspace_search_with_limit(honcho: &Honcho, report: &TestReport) {
-    match honcho.search("Hello", Some(5), None).await {
+    match honcho.search("Hello").limit(5).build().await {
         Ok(results) => {
             let _ = results;
             report.pass("workspace_search_with_limit");

@@ -110,6 +110,7 @@ impl fmt::Display for LocationSegment {
 /// The [`Self::Errors`] variant is listed first so JSON arrays match the
 /// structured form; [`Self::Message`] captures the string form; [`Self::Null`]
 /// captures an explicit JSON `null`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Detail {

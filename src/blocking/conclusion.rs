@@ -4,13 +4,10 @@ use crate::types::conclusion::ConclusionPage;
 
 use super::runtime::block_on;
 
-// NOTE (PR6 follow-up, deferred intentionally):
+// NOTE (deferred intentionally to a future major release):
 // * `Conclusion` here is a pure data wrapper that duplicates 7 getters plus
 //   `Debug`/`Display` of `crate::Conclusion`. Once a breaking release is
 //   acceptable, replace it with `pub use crate::Conclusion;`.
-// * `Conclusion::created_at()` returns `&DateTime<Utc>` to mirror the async
-//   API; `DateTime` is `Copy`, so returning by value would be more idiomatic.
-//   Changing the async signature too is breaking, hence deferred.
 // * The `Blocking*` builder prefixes below are redundant inside the
 //   `blocking::` module (`crate::ConclusionScope` already disambiguates), but
 //   renaming them alters public paths and is therefore deferred to a breaking
@@ -59,7 +56,7 @@ impl Conclusion {
 
     /// Creation timestamp.
     #[must_use]
-    pub fn created_at(&self) -> &chrono::DateTime<chrono::Utc> {
+    pub fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.inner.created_at()
     }
 

@@ -82,7 +82,7 @@ async fn make_session(server: &MockServer) -> Session {
         .await;
 
     let honcho = make_honcho(server);
-    honcho.session("sess1", None, None, None).await.unwrap()
+    honcho.session("sess1").build().await.unwrap()
 }
 
 // ── F6.4: add_messages ─────────────────────────────────────────────────
@@ -109,13 +109,12 @@ async fn add_messages_single_message() {
         .mount(&server)
         .await;
 
-    let messages = vec![honcho_ai::types::message::MessageCreate {
-        content: "hello".to_string(),
-        peer_id: "alice".to_string(),
-        metadata: None,
-        configuration: None,
-        created_at: None,
-    }];
+    let messages = vec![
+        honcho_ai::types::message::MessageCreate::builder()
+            .content("hello")
+            .peer_id("alice")
+            .build(),
+    ];
 
     let result = session.add_messages(messages).await.unwrap();
     assert_eq!(result.len(), 1);
@@ -131,13 +130,12 @@ async fn add_messages_batch_under_100_one_request() {
     let mut msgs = Vec::new();
     let mut expected_response = Vec::new();
     for i in 0..3 {
-        msgs.push(honcho_ai::types::message::MessageCreate {
-            content: format!("msg{i}"),
-            peer_id: "alice".to_string(),
-            metadata: None,
-            configuration: None,
-            created_at: None,
-        });
+        msgs.push(
+            honcho_ai::types::message::MessageCreate::builder()
+                .content(format!("msg{i}"))
+                .peer_id("alice")
+                .build(),
+        );
         expected_response.push(message_json(&format!("m{i}"), &format!("msg{i}"), "alice"));
     }
 
@@ -160,13 +158,12 @@ async fn add_messages_exactly_100_is_one_request() {
     let mut msgs = Vec::new();
     let mut expected_response = Vec::new();
     for i in 0..100 {
-        msgs.push(honcho_ai::types::message::MessageCreate {
-            content: format!("msg{i}"),
-            peer_id: "alice".to_string(),
-            metadata: None,
-            configuration: None,
-            created_at: None,
-        });
+        msgs.push(
+            honcho_ai::types::message::MessageCreate::builder()
+                .content(format!("msg{i}"))
+                .peer_id("alice")
+                .build(),
+        );
         expected_response.push(message_json(&format!("m{i}"), &format!("msg{i}"), "alice"));
     }
 
@@ -193,13 +190,12 @@ async fn add_messages_101_is_two_requests() {
     let mut response_chunk2 = Vec::new();
 
     for i in 0..101 {
-        msgs.push(honcho_ai::types::message::MessageCreate {
-            content: format!("msg{i}"),
-            peer_id: "alice".to_string(),
-            metadata: None,
-            configuration: None,
-            created_at: None,
-        });
+        msgs.push(
+            honcho_ai::types::message::MessageCreate::builder()
+                .content(format!("msg{i}"))
+                .peer_id("alice")
+                .build(),
+        );
         if i < 100 {
             response_chunk1.push(message_json(&format!("m{i}"), &format!("msg{i}"), "alice"));
         } else {
@@ -237,13 +233,12 @@ async fn add_messages_batch_over_100_chunks() {
     let mut response_chunk2 = Vec::new();
 
     for i in 0..150 {
-        msgs.push(honcho_ai::types::message::MessageCreate {
-            content: format!("msg{i}"),
-            peer_id: "alice".to_string(),
-            metadata: None,
-            configuration: None,
-            created_at: None,
-        });
+        msgs.push(
+            honcho_ai::types::message::MessageCreate::builder()
+                .content(format!("msg{i}"))
+                .peer_id("alice")
+                .build(),
+        );
         if i < 100 {
             response_chunk1.push(message_json(&format!("m{i}"), &format!("msg{i}"), "alice"));
         } else {

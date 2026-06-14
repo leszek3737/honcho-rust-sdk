@@ -9,8 +9,8 @@ use serde::Serialize;
 use crate::error::{HonchoError, Result};
 use crate::http::client::HttpClient;
 use crate::http::routes;
-use crate::types::conclusion::Conclusion as ConclusionData;
 use crate::types::conclusion::ConclusionPage;
+use crate::types::conclusion::ConclusionResponse as ConclusionData;
 use crate::types::conclusion::{ConclusionFilters, ConclusionGet, ConclusionQuery};
 use crate::types::dialectic::RepresentationResponse;
 use crate::types::pagination::paginate_post;
@@ -132,8 +132,9 @@ impl Conclusion {
     /// # }
     /// ```
     #[must_use]
-    pub fn created_at(&self) -> &DateTime<Utc> {
-        &self.inner.created_at
+    pub fn created_at(&self) -> DateTime<Utc> {
+        // `DateTime<Utc>` is `Copy`, so return by value rather than by reference.
+        self.inner.created_at
     }
 
     /// The workspace this conclusion belongs to.
@@ -747,7 +748,7 @@ impl ListConclusionsBuilder {
                     .build(),
             )
             .build();
-        let body = serde_json::to_value(&body).map_err(|e| HonchoError::Decode {
+        let body = serde_json::to_value(&body).map_err(|e| HonchoError::Serialization {
             path: "ConclusionGet".to_owned(),
             source: e,
         })?;
@@ -850,7 +851,7 @@ impl QueryConclusionsBuilder {
                     .build(),
             )
             .build();
-        let body = serde_json::to_value(&body).map_err(|e| HonchoError::Decode {
+        let body = serde_json::to_value(&body).map_err(|e| HonchoError::Serialization {
             path: "ConclusionQuery".to_owned(),
             source: e,
         })?;

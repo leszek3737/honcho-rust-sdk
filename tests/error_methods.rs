@@ -137,7 +137,7 @@ fn transport_error() -> HonchoError {
 // ─── message() ─────────────────────────────────────────────────────────
 //
 // Table-driven. `Transport` / `Io` / `Decode` return static placeholder
-// strings (PR6 is tracked to switch `message()` to `Cow` and surface the
+// strings (a future major release is tracked to switch `message()` to `Cow` and surface the
 // underlying error detail; until then we assert the current placeholders).
 
 #[test]
@@ -216,7 +216,7 @@ fn message_table() {
             HonchoError::Validation("bad val".into()),
             "bad val",
         ),
-        // Static placeholders — documents the PR6 Cow limitation.
+        // Static placeholders — documents the `Cow` limitation.
         ("Transport", transport_error(), "transport error"),
         ("Io", io_error(), "I/O error"),
         ("Decode", decode_error(), "failed to decode response"),

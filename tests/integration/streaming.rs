@@ -11,7 +11,7 @@ async fn chat_stream_drains_content() {
         return;
     };
 
-    let peer = client.peer("stream-test-peer", None, None).await.unwrap();
+    let peer = client.peer("stream-test-peer").build().await.unwrap();
 
     let stream = peer.chat_stream("Hi").send().await;
 

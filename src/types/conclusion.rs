@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Maps `OpenAPI` `Conclusion`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Conclusion {
+pub struct ConclusionResponse {
     /// Unique identifier.
     pub id: String,
     /// The conclusion content text.
@@ -131,8 +131,8 @@ fn default_top_k() -> u32 {
 
 /// A page of conclusion results.
 ///
-/// Alias for `Page<Conclusion>`, maps `OpenAPI` `Page[Conclusion]`.
-pub type ConclusionPage = Page<Conclusion>;
+/// Alias for `Page<ConclusionResponse>`, maps `OpenAPI` `Page[Conclusion]`.
+pub type ConclusionPage = Page<ConclusionResponse>;
 
 #[cfg(test)]
 mod tests {
