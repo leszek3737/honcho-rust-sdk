@@ -48,18 +48,28 @@ pub async fn run(honcho: &Honcho, report: &TestReport) -> honcho_ai::error::Resu
     }
 
     {
+        // No non-flaky structural invariant on a freshly-created session's
+        // metadata (it is empty until set later), so this is a "doesn't panic"
+        // smoke check.
         let _meta = session.metadata();
         report.pass("session_metadata_accessor");
     }
 
     {
+        // No non-flaky structural invariant on a freshly-created session's
+        // configuration (defaults are all None), so this is a "doesn't panic"
+        // smoke check.
         let _config = session.configuration();
         report.pass("session_configuration_accessor");
     }
 
     {
-        let _ts = session.created_at();
-        report.pass("session_created_at");
+        // A real creation timestamp must be a positive Unix time.
+        if session.created_at().timestamp() > 0 {
+            report.pass("session_created_at");
+        } else {
+            report.fail("session_created_at", "created_at timestamp is not positive");
+        }
     }
 
     match session.get_metadata().await {

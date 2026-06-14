@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use honcho_ai::Honcho;
-use tokio::runtime::Handle;
+use honcho_ai::Message;
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::time::Duration;
 
 /// Maximum time the [`WorkspaceGuard`] waits for `delete_workspace` during
@@ -86,9 +87,11 @@ impl fmt::Display for TestReport {
 /// `smoke-test-*` workspace is leaked.
 ///
 /// `Drop` needs a multi-thread tokio runtime: it uses `block_in_place` +
-/// `Handle::block_on`, which is only valid on a multi-thread runtime. On a
-/// `current_thread` runtime (or outside tokio entirely) it cannot block, so it
-/// degrades to an `eprintln!` warning rather than panicking during unwind.
+/// `Handle::block_on`, which is only valid on a multi-thread runtime. It probes
+/// the current handle's [`RuntimeFlavor`] and only blocks when it is
+/// `MultiThread`. On a `current_thread` runtime (where `block_in_place` would
+/// panic) or outside tokio entirely it cannot block, so it degrades to an
+/// `eprintln!` warning rather than panicking during unwind.
 pub struct WorkspaceGuard {
     client: Honcho,
     workspace_id: String,
@@ -115,6 +118,15 @@ impl Drop for WorkspaceGuard {
             );
             return;
         };
+        // `block_in_place` panics on a current_thread runtime, so only block
+        // when the flavor is multi-thread; otherwise degrade to a warning.
+        if handle.runtime_flavor() != RuntimeFlavor::MultiThread {
+            eprintln!(
+                "  warning: not a multi-thread runtime in Drop; workspace {ws_id} not cleaned up \
+                 (multi-thread runtime required)"
+            );
+            return;
+        }
         tokio::task::block_in_place(|| {
             let cleanup =
                 tokio::time::timeout(CLEANUP_TIMEOUT, self.client.delete_workspace(ws_id));
@@ -127,5 +139,34 @@ impl Drop for WorkspaceGuard {
                 ),
             }
         });
+    }
+}
+
+/// Run a search closure with retry to ride out async message indexing, then
+/// assert the result is non-empty. Shared by the `messages` and `peer`
+/// scenarios so both use identical retry/backoff policy (5 attempts, linear
+/// `500ms * attempt` backoff).
+pub async fn assert_search_nonempty<F, Fut>(name: &str, report: &TestReport, mut search: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = honcho_ai::error::Result<Vec<Message>>>,
+{
+    let mut last_err: Option<String> = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+        }
+        match search().await {
+            Ok(results) if !results.is_empty() => {
+                report.pass(name);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    match last_err {
+        Some(e) => report.fail(name, &format!("persistent error: {e}")),
+        None => report.fail(name, "no results after retries (indexing may be slow)"),
     }
 }

@@ -1,11 +1,10 @@
-use super::harness::TestReport;
+use super::harness::{TestReport, assert_search_nonempty};
 use honcho_ai::Honcho;
 use honcho_ai::types::message::MessageSearchOptions;
 use honcho_ai::types::peer::PeerConfig;
 use honcho_ai::types::session::SessionListOptions;
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 
 /// Report `Ok` as pass and `Err` as fail under `name` — collapses the dozens of
 /// identical `match { Ok => pass, Err => fail }` blocks in this scenario.
@@ -170,7 +169,7 @@ pub async fn run(honcho: &Honcho, report: &TestReport) {
     let opts = SessionListOptions::builder().page(1).size(10).build();
     check(name, peer.sessions_with_options(&opts).await, report);
 
-    test_peer_search(&peer, report).await;
+    assert_search_nonempty("peer_search", report, || peer.search("Hello")).await;
 
     let name = "peer_search_with_options";
     let search_opts = MessageSearchOptions::builder()
@@ -273,26 +272,4 @@ pub async fn run(honcho: &Honcho, report: &TestReport) {
             .await,
         report,
     );
-}
-
-async fn test_peer_search(peer: &honcho_ai::Peer, report: &TestReport) {
-    let name = "peer_search";
-    let mut last_err: Option<String> = None;
-    for attempt in 0..5 {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-        }
-        match peer.search("Hello").await {
-            Ok(results) if !results.is_empty() => {
-                report.pass(name);
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => last_err = Some(e.to_string()),
-        }
-    }
-    match last_err {
-        Some(e) => report.fail(name, &format!("persistent error: {e}")),
-        None => report.fail(name, "no results after retries (indexing may be slow)"),
-    }
 }

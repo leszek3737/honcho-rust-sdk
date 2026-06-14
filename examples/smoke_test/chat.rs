@@ -103,7 +103,12 @@ async fn test_chat_with_streaming_false(peer: &honcho_ai::Peer, report: &TestRep
         .query("Hello with stream false")
         .stream(false)
         .build();
+    // None is legitimate on a fresh async-derived session, but Some("") is a
+    // regression: fail only when content is present but empty.
     match peer.chat_with_options(&opts).await {
+        Ok(Some(c)) if c.trim().is_empty() => {
+            report.fail(name, "Some(content) but content is empty");
+        }
         Ok(_content) => report.pass(name),
         Err(e) => report.fail(name, &e.to_string()),
     }
@@ -115,7 +120,12 @@ async fn test_chat_with_reasoning_level(peer: &honcho_ai::Peer, report: &TestRep
         .query("Think harder")
         .reasoning_level(ReasoningLevel::Medium)
         .build();
+    // None is legitimate on a fresh async-derived session, but Some("") is a
+    // regression: fail only when content is present but empty.
     match peer.chat_with_options(&opts).await {
+        Ok(Some(c)) if c.trim().is_empty() => {
+            report.fail(name, "Some(content) but content is empty");
+        }
         Ok(_content) => report.pass(name),
         Err(e) => report.fail(name, &e.to_string()),
     }

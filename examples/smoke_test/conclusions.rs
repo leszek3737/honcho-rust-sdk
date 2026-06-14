@@ -231,21 +231,26 @@ pub async fn run(honcho: &Honcho, report: &TestReport) -> honcho_ai::error::Resu
     }
 
     // 10. list with session filter — the session-scoped conclusion must appear.
-    match scope.list().session(concl_session.id()).send().await {
-        Ok(page) => {
-            let has_scoped = session_scoped_id
-                .as_ref()
-                .is_none_or(|id| page.items().iter().any(|c| &c.id == id));
-            if has_scoped {
-                report.pass("conclusion_list_with_session");
-            } else {
-                report.fail(
-                    "conclusion_list_with_session",
-                    "session-scoped conclusion missing from filtered list",
-                );
+    // Gate on test 2: if no session-scoped conclusion was created, this test has
+    // no prerequisite and must fail explicitly (not pass vacuously).
+    match &session_scoped_id {
+        Some(scoped_id) => match scope.list().session(concl_session.id()).send().await {
+            Ok(page) => {
+                if page.items().iter().any(|c| &c.id == scoped_id) {
+                    report.pass("conclusion_list_with_session");
+                } else {
+                    report.fail(
+                        "conclusion_list_with_session",
+                        "session-scoped conclusion missing from filtered list",
+                    );
+                }
             }
-        }
-        Err(e) => report.fail("conclusion_list_with_session", &e.to_string()),
+            Err(e) => report.fail("conclusion_list_with_session", &e.to_string()),
+        },
+        None => report.fail(
+            "conclusion_list_with_session",
+            "prerequisite test 2 (session-scoped conclusion) failed",
+        ),
     }
 
     // 11. list with reverse — when the page has >= 2 items, assert the order is

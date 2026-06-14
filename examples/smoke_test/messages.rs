@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Cursor;
-use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::StreamExt;
 use honcho_ai::types::common::ReasoningConfiguration;
 use honcho_ai::types::message::{MessageConfiguration, MessageSearchOptions};
-use honcho_ai::{FileSource, Honcho, Message};
+use honcho_ai::{FileSource, Honcho};
 use serde_json::Value;
 
-use super::harness::TestReport;
+use super::harness::{TestReport, assert_search_nonempty};
 
 /// Term seeded into the session so the search tests assert on real hits rather
 /// than just "the endpoint did not throw".
@@ -383,33 +382,6 @@ async fn test_session_update_message(
             }
         }
         Err(e) => report.fail("session_update_message", &e.to_string()),
-    }
-}
-
-/// Run a search closure with retry to ride out async message indexing, then
-/// assert the result is non-empty.
-async fn assert_search_nonempty<F, Fut>(name: &str, report: &TestReport, mut search: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = honcho_ai::error::Result<Vec<Message>>>,
-{
-    let mut last_err: Option<String> = None;
-    for attempt in 0..5 {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-        }
-        match search().await {
-            Ok(results) if !results.is_empty() => {
-                report.pass(name);
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => last_err = Some(e.to_string()),
-        }
-    }
-    match last_err {
-        Some(e) => report.fail(name, &format!("persistent error: {e}")),
-        None => report.fail(name, "no results after retries (indexing may be slow)"),
     }
 }
 

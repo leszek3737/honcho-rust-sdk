@@ -189,10 +189,20 @@ pub async fn run(honcho: &Honcho, report: &TestReport) {
     }
 
     let name = "workspace_peers_with_filters";
-    // Empty filters, page 1, size 50, reverse=false.
+    // Empty filters return all peers, so the "dream-peer" created synchronously
+    // above must be present (creation is not search-indexed: deterministic).
     let filters = HashMap::new();
     match honcho.peers_with_filters(filters, 1, 50, false).await {
-        Ok(_page) => report.pass(name),
+        Ok(page) => {
+            if page.items().iter().any(|p| p.id == "dream-peer") {
+                report.pass(name);
+            } else {
+                report.fail(
+                    name,
+                    "created peer 'dream-peer' missing from unfiltered list",
+                );
+            }
+        }
         Err(e) => report.fail(name, &e.to_string()),
     }
 
@@ -203,11 +213,24 @@ pub async fn run(honcho: &Honcho, report: &TestReport) {
     }
 
     let name = "workspace_sessions_with_filters";
-    // Empty filters, page 1, size 50, reverse=false.
-    let filters = HashMap::new();
-    match honcho.sessions_with_filters(filters, 1, 50, false).await {
-        Ok(_page) => report.pass(name),
-        Err(e) => report.fail(name, &e.to_string()),
+    // Create a session synchronously so its presence in an unfiltered list is
+    // deterministic (creation is not search-indexed), then assert it appears.
+    match honcho.session("workspace-filter-sess").build().await {
+        Ok(known_session) => {
+            let known_session_id = known_session.id().to_owned();
+            let filters = HashMap::new();
+            match honcho.sessions_with_filters(filters, 1, 50, false).await {
+                Ok(page) => {
+                    if page.items().iter().any(|s| s.id == known_session_id) {
+                        report.pass(name);
+                    } else {
+                        report.fail(name, "created session missing from unfiltered list");
+                    }
+                }
+                Err(e) => report.fail(name, &e.to_string()),
+            }
+        }
+        Err(e) => report.fail(name, &format!("create session: {e}")),
     }
 
     // workspaces() must list the current workspace.
