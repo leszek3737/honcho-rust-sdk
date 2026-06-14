@@ -47,6 +47,7 @@ API base path is `/v3/`. All route builders live in `src/http/routes.rs`.
 - **`#[non_exhaustive]`** on `HonchoError`. Match on `code()` (machine-readable string) not variants.
 - **Edition 2024** — all impl blocks may need `unsafe` markers for unsafe trait impls.
 - **Always run after every change**: `cargo fmt --check && cargo fmt` (if needed) then `cargo clippy --all-targets --all-features -- -D warnings`. Fix all warnings. Only pre-existing warnings may remain.
+- **Never rewrite pushed history**: `git commit --amend`, rebase, squash, and force-push are only for local, un-pushed commits. Once a commit has been pushed to a remote, do **not** amend/rewrite it — add a new commit on top instead.
 
 ## Env Var Resolution
 
