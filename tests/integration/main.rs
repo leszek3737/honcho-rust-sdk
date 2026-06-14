@@ -18,6 +18,9 @@
 //! integration target; submodules should not duplicate them.
 #![allow(clippy::print_stderr)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Integration tests are long, sequential end-to-end flows by nature; the
+// line-count lint is noise here.
+#![allow(clippy::too_many_lines)]
 
 mod common;
 mod lifecycle;
