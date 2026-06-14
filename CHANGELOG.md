@@ -13,6 +13,18 @@ upgrading. Most breaks are mechanical one-line fixes.
 
 ### BREAKING
 
+> ⚠️ **Silent behavioral change — audit your error matching.** The
+> `HonchoError::Serialization` recategorization (see the variant entry below) is
+> the only break in this release that does **not** produce a compile error. Code
+> with a wildcard (`_ => …`) arm in a `match` over `HonchoError` keeps compiling
+> unchanged, yet its runtime behavior changes: serde **serialize** failures that
+> previously surfaced as `HonchoError::Configuration` / `HonchoError::Decode` now
+> surface as `HonchoError::Serialization`. **Action:** audit every `match` /
+> `if let` that recovers from serialize failures via `HonchoError::Configuration`
+> or `HonchoError::Decode` and move that handling to `HonchoError::Serialization`.
+> Every *other* break below is a compile error the compiler points you to — this
+> one is not, so it is easy to miss.
+
 - **`http` module is now private.** `pub mod http` became `pub(crate)`. The
   module never carried any stability guarantees. Stop importing
   `honcho_ai::http::*`; use the public client API instead.
@@ -30,17 +42,22 @@ upgrading. Most breaks are mechanical one-line fixes.
   `Honcho::search` (plus blocking mirrors) replace their positional `Option`
   arguments with `bon` builders. `client.peer("a", None, None)` becomes
   `client.peer("a").build()` (or `.config(cfg).build()`). The default `limit`
-  for `search` is now `10`.
+  for `search` is **unchanged** (it was already `10` via `limit.unwrap_or(10)`);
+  it is now expressed declaratively as `#[builder(default = 10)]`.
 - **`#[non_exhaustive]` on public DTOs/enums.** Added to `FileSource`,
-  `MessageCreate`, `MessageUpdate`, `MessageSearchOptions` (and other public
-  DTOs/enums). Out-of-crate struct literals and exhaustive `match` arms no
-  longer compile — construct values via their builder or `Default`, and add a
-  `_ => …` wildcard arm to matches over these enums.
-- **New `HonchoError::Serialization` variant.** serde **serialize** failures are
+  `Environment`, `MessageCreate`, `MessageUpdate`, `MessageSearchOptions` (and
+  other public DTOs/enums). Out-of-crate struct literals and exhaustive `match`
+  arms no longer compile — construct values via their builder or `Default`, and
+  add a `_ => …` wildcard arm to matches over these enums.
+- **New `HonchoError::Serialization` variant (silent behavioral break — see the
+  warning at the top of this section).** serde **serialize** failures are
   recategorized away from `Configuration`/`Decode` into the new `Serialization`
   variant. Code that matched `Configuration`/`Decode` to handle serialize
   failures must now match `Serialization`. `HonchoError` is `#[non_exhaustive]`,
-  so an existing wildcard arm already absorbs the new variant.
+  so an existing wildcard arm already absorbs the new variant — which is exactly
+  why this break is **behavioral, not compile-time**: downstream still compiles,
+  but error-matching behavior shifts. Audit your error handling rather than
+  relying on the compiler to flag it.
 - **Blocking filtered listings are now paginated.** Blocking
   `Honcho::peers_with_filters` and `Honcho::sessions_with_filters` now return
   the paginated `Page<…>` shape (parity with the async API) instead of only the
@@ -78,7 +95,8 @@ Apply these one-line fixes, in order:
 3. **`created_at()`** — drop the leading `*`/`&`: `let ts = msg.created_at();`.
 4. **Client entry points** — convert positional calls to builders:
    `client.peer("a", None, None)` → `client.peer("a").build()`; pass config via
-   `.config(cfg).build()`. Note `search`'s default `limit` is now `10`.
+   `.config(cfg).build()`. `search`'s default `limit` is unchanged (was already
+   `10`), now expressed via `#[builder(default = 10)]` — no behavior change.
 5. **`#[non_exhaustive]` DTOs/enums** — replace struct literals with the
    builder/`Default`, and add a `_ => …` arm to any exhaustive `match`.
 6. **`HonchoError`** — for serde serialize failures, match the new

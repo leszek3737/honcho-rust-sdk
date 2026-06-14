@@ -56,7 +56,8 @@ pub struct MessageCreate {
 }
 
 /// Parameters for batch-creating messages (1–100).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, bon::Builder)]
+#[builder(finish_fn = build)]
 #[non_exhaustive]
 pub struct MessageBatchCreate {
     /// List of messages to create.
@@ -75,9 +76,14 @@ pub struct MessageUpdate {
 }
 
 /// Request body for setting message metadata.
-#[non_exhaustive]
+///
+/// Crate-internal: only ever constructed in-crate (see `Session::update_message`)
+/// and not re-exported at the crate root. It carries no `Deserialize` impl, so it
+/// cannot be used as a deserialization target out-of-crate either — hence
+/// `pub(crate)` with no `#[non_exhaustive]` (that attribute only governs a
+/// cross-crate contract).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct MessageMetadataSet {
+pub(crate) struct MessageMetadataSet {
     /// Metadata to set.
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -137,6 +143,18 @@ mod tests {
     fn message_search_options_default_limit() {
         let opts: MessageSearchOptions = serde_json::from_str(r#"{"query":"hello"}"#).unwrap();
         assert_eq!(opts.limit, 10);
+    }
+
+    #[test]
+    fn message_batch_create_builder_constructs_from_messages() {
+        // The builder makes out-of-crate construction possible, so `#[non_exhaustive]`
+        // no longer "lies": evolution stays non-breaking while construction stays viable.
+        let msg = MessageCreate::builder()
+            .content("hello")
+            .peer_id("peer_01")
+            .build();
+        let batch = MessageBatchCreate::builder().messages(vec![msg]).build();
+        assert_eq!(batch.messages.len(), 1);
     }
 
     #[test]

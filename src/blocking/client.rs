@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use url::Url;
 
-use crate::client::HonchoParams;
+use crate::client::{DEFAULT_SEARCH_LIMIT, HonchoParams};
 use crate::error::Result;
 use crate::session::PeerSpec;
 use crate::types::dream::QueueStatus;
@@ -193,7 +193,7 @@ impl Honcho {
     pub fn search(
         &self,
         #[builder(start_fn)] query: String,
-        #[builder(default = 10)] limit: u32,
+        #[builder(default = DEFAULT_SEARCH_LIMIT)] limit: u32,
         filters: Option<HashMap<String, Value>>,
     ) -> Result<Vec<crate::Message>> {
         block_on(

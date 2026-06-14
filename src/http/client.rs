@@ -114,7 +114,6 @@ struct Inner {
 }
 
 #[derive(Clone)]
-#[doc(hidden)]
 pub struct HttpClient {
     inner: Arc<Inner>,
 }
@@ -122,8 +121,11 @@ pub struct HttpClient {
 #[derive(bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
-#[doc(hidden)]
 pub struct HttpClientParams {
+    // Set by the builder in all builds, but only read by the test-only
+    // `from_params`; production uses `from_params_with_base_url` with a
+    // pre-normalized URL. Suppress dead_code only outside test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) base_url: String,
     pub(crate) api_key: Option<String>,
     #[builder(default = DEFAULT_MAX_RETRIES)]
@@ -155,6 +157,9 @@ impl HttpClient {
             .map_err(|e| HonchoError::Configuration(format!("failed to build URL: {e}")))
     }
 
+    // Test-only convenience constructor: production code paths go through
+    // `from_params_with_base_url`, which receives an already-normalized URL.
+    #[cfg(test)]
     pub fn from_params(params: HttpClientParams) -> Result<Self> {
         let base_url = normalize_base_url(&params.base_url)?;
         Self::from_params_with_base_url(params, base_url)
