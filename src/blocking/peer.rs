@@ -10,7 +10,7 @@ use crate::types::dialectic::{DialecticOptions, ReasoningLevel};
 use crate::types::message::MessageSearchOptions;
 use crate::types::pagination::Page;
 use crate::types::peer::{PeerConfig, PeerContext};
-use crate::types::session::{Session, SessionListOptions};
+use crate::types::session::{SessionListOptions, SessionResponse};
 
 use super::conclusion::ConclusionScope;
 use super::iter::{BlockingIter, collect_pages};
@@ -153,7 +153,8 @@ impl Peer {
     /// Get the peer's context scoped to a target.
     ///
     /// Deprecated surrogate for [`Peer::context_builder`](Self::context_builder).
-    /// Scheduled for removal in PR6; new code should use the builder directly.
+    /// Scheduled for removal in a future major release; new code should use the
+    /// builder directly.
     #[deprecated(since = "0.1.1", note = "use `Peer::context_builder()` instead")]
     #[allow(deprecated)]
     pub fn context_with_target(&self, target: &str) -> Result<PeerContext> {
@@ -163,7 +164,8 @@ impl Peer {
     /// Get the peer's context with custom options.
     ///
     /// Deprecated surrogate for [`Peer::context_builder`](Self::context_builder).
-    /// Scheduled for removal in PR6; new code should use the builder directly.
+    /// Scheduled for removal in a future major release; new code should use the
+    /// builder directly.
     #[deprecated(since = "0.1.1", note = "use `Peer::context_builder()` instead")]
     #[allow(deprecated)]
     pub fn context_with_options(
@@ -174,12 +176,15 @@ impl Peer {
     }
 
     /// List sessions for this peer, collecting across pages.
-    pub fn sessions(&self) -> Result<Vec<Session>> {
+    pub fn sessions(&self) -> Result<Vec<SessionResponse>> {
         collect_pages(self.inner.sessions())
     }
 
     /// List sessions with filters and pagination options. Returns a [`Page`].
-    pub fn sessions_with_options(&self, options: &SessionListOptions) -> Result<Page<Session>> {
+    pub fn sessions_with_options(
+        &self,
+        options: &SessionListOptions,
+    ) -> Result<Page<SessionResponse>> {
         block_on(self.inner.sessions_with_options(options))?
     }
 

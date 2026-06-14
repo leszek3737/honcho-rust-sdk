@@ -106,6 +106,15 @@ pub enum HonchoError {
         #[source]
         source: serde_json::Error,
     },
+    /// Failed to serialize a value before sending it to the API.
+    #[error("Failed to serialize {path}: {source}")]
+    Serialization {
+        /// Logical name of the value being serialized (e.g. a request DTO name).
+        path: String,
+        /// The underlying serde error.
+        #[source]
+        source: serde_json::Error,
+    },
     /// IO error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -152,6 +161,7 @@ impl HonchoError {
             Self::Connection { .. } => "connection_error",
             Self::Transport(_) => "transport_error",
             Self::Decode { .. } => "decode_error",
+            Self::Serialization { .. } => "serialization_error",
             Self::Io(_) => "io_error",
             Self::Configuration(_) => "configuration_error",
             Self::Validation(_) => "validation_error",
@@ -175,6 +185,7 @@ impl HonchoError {
             | Self::Connection { .. }
             | Self::Transport(_)
             | Self::Decode { .. }
+            | Self::Serialization { .. }
             | Self::Io(_)
             | Self::Configuration(_)
             | Self::Validation(_) => None,
@@ -236,13 +247,14 @@ impl HonchoError {
     /// Returns the human-readable error message.
     ///
     /// **Limitation (planned for a future breaking change):** for `Transport`,
-    /// `Io`, and `Decode` the returned string is a fixed placeholder rather
-    /// than the underlying source error's detail. Inspect the source via
-    /// [`Error::source`](std::error::Error::source) for the full description.
+    /// `Io`, `Decode`, and `Serialization` the returned string is a fixed
+    /// placeholder rather than the underlying source error's detail. Inspect
+    /// the source via [`Error::source`](std::error::Error::source) for the full
+    /// description.
     #[must_use]
     // Each variant maps 1:1 to its `message` field today, so several arms look
     // textually identical. Kept explicit per-variant for readability; the arms
-    // will diverge once the planned PR6 `message() -> Cow` change lands.
+    // will diverge once the planned `message() -> Cow` change lands in a future major release.
     #[allow(clippy::match_same_arms)]
     pub fn message(&self) -> &str {
         match self {
@@ -260,6 +272,7 @@ impl HonchoError {
             Self::Transport(_) => "transport error",
             Self::Io(_) => "I/O error",
             Self::Decode { .. } => "failed to decode response",
+            Self::Serialization { .. } => "failed to serialize request",
             Self::Configuration(s) => s,
             Self::Validation(s) => s,
             Self::PartialFailure { error, .. } => error.message(),

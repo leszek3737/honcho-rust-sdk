@@ -38,6 +38,7 @@ pub struct MessageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
+#[non_exhaustive]
 pub struct MessageCreate {
     /// Message content text (max 25 000 characters, server-validated).
     pub content: String,
@@ -66,6 +67,7 @@ pub struct MessageBatchCreate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
+#[non_exhaustive]
 pub struct MessageUpdate {
     /// Updated metadata (replaces existing).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,6 +97,7 @@ pub struct MessageConfiguration {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
+#[non_exhaustive]
 pub struct MessageSearchOptions {
     /// Search query string.
     pub query: String,

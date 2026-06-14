@@ -85,8 +85,8 @@ impl Message {
 
     /// When this message was created.
     #[must_use]
-    pub fn created_at(&self) -> &DateTime<Utc> {
-        &self.inner.created_at
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.inner.created_at
     }
 
     /// Token count for the message content.

@@ -9,7 +9,7 @@
 use honcho_ai::client::Honcho;
 use honcho_ai::types::pagination::Page;
 use honcho_ai::types::peer::Peer;
-use honcho_ai::types::session::Session;
+use honcho_ai::types::session::SessionResponse;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -151,7 +151,7 @@ async fn sessions_returns_paginated() {
         .mount(&server)
         .await;
 
-    let page: Page<Session> = honcho.sessions().await.unwrap();
+    let page: Page<SessionResponse> = honcho.sessions().await.unwrap();
     assert_eq!(page.items().len(), 2);
     assert_eq!(page.items()[0].id, "s1");
     assert_eq!(page.items()[1].id, "s2");

@@ -15,7 +15,7 @@ async fn main() -> honcho_ai::error::Result<()> {
             .build(),
     )?;
 
-    let peer = honcho.peer("user-1", None, None).await?;
+    let peer = honcho.peer("user-1").build().await?;
 
     let mut stream = peer.chat_stream("Tell me a story").send().await?;
 

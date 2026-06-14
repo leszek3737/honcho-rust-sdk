@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 pub type JsonValue = serde_json::Value;
 
 /// Configuration for reasoning functionality.
+///
+/// # Examples
+///
+/// This type is `#[non_exhaustive]`, so it cannot be built with a struct
+/// literal (and therefore not with functional-update `..Default::default()`
+/// syntax) from outside the crate. Start from [`Default`] and set the fields
+/// you need:
+///
+/// ```
+/// use honcho_ai::types::common::ReasoningConfiguration;
+///
+/// let mut config = ReasoningConfiguration::default();
+/// config.enabled = Some(true);
+/// config.custom_instructions = Some("focus on the most recent turns".to_owned());
+///
+/// assert_eq!(config.enabled, Some(true));
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningConfiguration {

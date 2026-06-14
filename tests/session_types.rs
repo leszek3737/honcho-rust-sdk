@@ -4,8 +4,8 @@ mod common;
 
 use common::{load_fixture, roundtrip, validate_openapi};
 use honcho_ai::types::session::{
-    Session, SessionConfiguration, SessionContext, SessionContextOptions, SessionCreate,
-    SessionGet, SessionPage, SessionPeerConfig, SessionQueueStatus, SessionSummaries,
+    SessionConfiguration, SessionContext, SessionContextOptions, SessionCreate, SessionGet,
+    SessionPage, SessionPeerConfig, SessionQueueStatus, SessionResponse, SessionSummaries,
     SessionUpdate, Summary, SummaryConfiguration, SummaryType,
 };
 
@@ -41,7 +41,7 @@ macro_rules! schema_tests {
     };
 }
 
-schema_tests!(session, "Session", Session);
+schema_tests!(session, "Session", SessionResponse);
 schema_tests!(session_create, "SessionCreate", SessionCreate);
 schema_tests!(session_update, "SessionUpdate", SessionUpdate);
 schema_tests!(session_get, "SessionGet", SessionGet);

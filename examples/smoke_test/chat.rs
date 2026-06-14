@@ -7,8 +7,8 @@ use tokio::time::{Duration, timeout};
 const STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn run(honcho: &Honcho, report: &mut TestReport) -> honcho_ai::error::Result<()> {
-    let peer = honcho.peer("chat-peer", None, None).await?;
-    let session = honcho.session("chat-sess", None, None, None).await?;
+    let peer = honcho.peer("chat-peer").build().await?;
+    let session = honcho.session("chat-sess").build().await?;
     session.add_peer(peer.id()).await?;
     session
         .add_messages(vec![peer.message("Context: I like Rust").build()?])

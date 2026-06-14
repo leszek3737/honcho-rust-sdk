@@ -9,8 +9,8 @@ fn main() -> honcho_ai::error::Result<()> {
     let honcho = Honcho::new("http://localhost:8000", "blocking-demo")?;
     honcho.force_ensure()?;
 
-    let peer = honcho.peer("user-1", None, None)?;
-    let session = honcho.session("sess-1", None, None, None)?;
+    let peer = honcho.peer("user-1").build()?;
+    let session = honcho.session("sess-1").build()?;
 
     session.add_messages(vec![peer.message("Hello from blocking!").build()?])?;
 

@@ -11,11 +11,8 @@ async fn upload_bytes_file_to_session() {
         return;
     };
 
-    let _peer = client.peer("upload-test-peer", None, None).await.unwrap();
-    let session = client
-        .session("upload-test-session", None, None, None)
-        .await
-        .unwrap();
+    let _peer = client.peer("upload-test-peer").build().await.unwrap();
+    let session = client.session("upload-test-session").build().await.unwrap();
     session.add_peer("upload-test-peer").await.unwrap();
 
     let content = "X".repeat(1024);
@@ -52,9 +49,10 @@ async fn upload_streamed_file_to_session() {
         return;
     };
 
-    let _peer = client.peer("upload-stream-peer", None, None).await.unwrap();
+    let _peer = client.peer("upload-stream-peer").build().await.unwrap();
     let session = client
-        .session("upload-stream-session", None, None, None)
+        .session("upload-stream-session")
+        .build()
         .await
         .unwrap();
     session.add_peer("upload-stream-peer").await.unwrap();

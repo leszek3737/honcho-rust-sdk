@@ -67,6 +67,7 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("id", &self.inner.id())
             .field("is_active", &self.inner.is_active())
+            .field("created_at", &self.inner.created_at())
             .finish()
     }
 }
@@ -98,6 +99,12 @@ impl Session {
     #[must_use]
     pub fn configuration(&self) -> Option<SessionConfiguration> {
         self.inner.configuration()
+    }
+
+    /// Returns the time this session was created.
+    #[must_use]
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.inner.created_at()
     }
 
     /// Refresh cached state from the server.

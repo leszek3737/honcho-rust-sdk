@@ -80,7 +80,7 @@ async fn make_session(server: &MockServer) -> Session {
         .await;
 
     let honcho = make_honcho(server);
-    honcho.session("sess1", None, None, None).await.unwrap()
+    honcho.session("sess1").build().await.unwrap()
 }
 
 // ── F6.1: Construction + Metadata/Config CRUD ────────────────────────

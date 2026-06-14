@@ -42,8 +42,8 @@
 //! | `ConclusionScope::query` | `BlockingQueryConclusionsBuilder` |
 //!
 //! The re-exports (plus `#![warn(unnameable_types)]` in the crate root) are a
-//! breaking change to the public surface and are deferred to a future release
-//! (tracked for PR6). Until then, store the produced builder inline or factor
+//! breaking change to the public surface and are deferred to a future major
+//! release. Until then, store the produced builder inline or factor
 //! it through a generic helper rather than naming the type.
 
 mod client;

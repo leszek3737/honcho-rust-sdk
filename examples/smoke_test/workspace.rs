@@ -13,7 +13,7 @@ use std::collections::HashMap;
 pub async fn run(honcho: &Honcho, report: &mut TestReport) {
     report.scenario("workspace");
 
-    let dream_peer = match honcho.peer("dream-peer", None, None).await {
+    let dream_peer = match honcho.peer("dream-peer").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("workspace_create_dream_peer", &e.to_string());

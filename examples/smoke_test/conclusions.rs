@@ -5,14 +5,14 @@ use honcho_ai::{ConclusionCreateParams, Honcho};
 
 #[allow(clippy::similar_names, clippy::too_many_lines)]
 pub async fn run(honcho: &Honcho, report: &mut TestReport) -> honcho_ai::error::Result<()> {
-    let observer = match honcho.peer("concl-observer", None, None).await {
+    let observer = match honcho.peer("concl-observer").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("conclusion_setup", &e.to_string());
             return Err(e);
         }
     };
-    let observed = match honcho.peer("concl-observed", None, None).await {
+    let observed = match honcho.peer("concl-observed").build().await {
         Ok(p) => p,
         Err(e) => {
             report.fail("conclusion_setup", &e.to_string());
@@ -22,13 +22,10 @@ pub async fn run(honcho: &Honcho, report: &mut TestReport) -> honcho_ai::error::
     let scope = observer.conclusions();
     let cross_scope = observer.conclusions_of(observed.id());
 
-    let concl_session = honcho
-        .session("concl-session", None, None, None)
-        .await
-        .map_err(|e| {
-            report.fail("conclusion_setup", &format!("session: {e}"));
-            e
-        })?;
+    let concl_session = honcho.session("concl-session").build().await.map_err(|e| {
+        report.fail("conclusion_setup", &format!("session: {e}"));
+        e
+    })?;
 
     // 1. create single
     let mut created_id = String::new();

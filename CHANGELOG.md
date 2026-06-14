@@ -2,7 +2,109 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.0] - 2026-06-14
+
+This release tightens the public API surface ahead of `1.0`. It contains
+several **breaking changes**; please read the **Migration guide** below before
+upgrading. Most breaks are mechanical one-line fixes.
+
+### BREAKING
+
+- **`http` module is now private.** `pub mod http` became `pub(crate)`. The
+  module never carried any stability guarantees. Stop importing
+  `honcho_ai::http::*`; use the public client API instead.
+- **DTO renames.** `honcho_ai::types::conclusion::Conclusion` →
+  `ConclusionResponse`, and `honcho_ai::types::session::Session` →
+  `SessionResponse`. The high-level wrapper types `honcho_ai::Conclusion` and
+  `honcho_ai::Session` are **unchanged** — only the raw DTOs moved.
+- **`created_at()` returns by value.** `created_at()` on `Message`, `Session`,
+  and `Conclusion` — plus the blocking `Conclusion` mirror — now returns
+  `DateTime<Utc>` by value instead of `&DateTime<Utc>`. `DateTime<Utc>` is
+  `Copy`, so drop the leading `*`/`&` at call sites. The blocking `Session`
+  wrapper had no `created_at()` accessor before; its newly added getter returns
+  by value from the start (additive, not a changed signature).
+- **Builder-based client entry points.** `Honcho::peer`, `Honcho::session`, and
+  `Honcho::search` (plus blocking mirrors) replace their positional `Option`
+  arguments with `bon` builders. `client.peer("a", None, None)` becomes
+  `client.peer("a").build()` (or `.config(cfg).build()`). The default `limit`
+  for `search` is now `10`.
+- **`#[non_exhaustive]` on public DTOs/enums.** Added to `FileSource`,
+  `MessageCreate`, `MessageUpdate`, `MessageSearchOptions` (and other public
+  DTOs/enums). Out-of-crate struct literals and exhaustive `match` arms no
+  longer compile — construct values via their builder or `Default`, and add a
+  `_ => …` wildcard arm to matches over these enums.
+- **New `HonchoError::Serialization` variant.** serde **serialize** failures are
+  recategorized away from `Configuration`/`Decode` into the new `Serialization`
+  variant. Code that matched `Configuration`/`Decode` to handle serialize
+  failures must now match `Serialization`. `HonchoError` is `#[non_exhaustive]`,
+  so an existing wildcard arm already absorbs the new variant.
+- **Blocking filtered listings are now paginated.** Blocking
+  `Honcho::peers_with_filters` and `Honcho::sessions_with_filters` now return
+  the paginated `Page<…>` shape (parity with the async API) instead of only the
+  first page.
+
+### Added
+
+- Root re-exports for ergonomic imports: `HonchoError`, `Result`,
+  `HonchoParams`, `Environment`, `ReasoningLevel`, `Page`, `PageResponse`,
+  `MessagePage`, the builder types, and the `*Response` DTOs
+  (`ConclusionResponse`, `SessionResponse`, …).
+- `impl From<Peer> for PeerSpec` and
+  `impl From<(&Peer, SessionPeerConfig)> for PeerSpec` — an owned `Peer` no
+  longer needs to be borrowed (`&`) when building a `PeerSpec`.
+- docs.rs feature badges so feature-gated items are clearly marked in the
+  rendered documentation.
+
+### Deferred / known SemVer debt
+
+- **Validated newtypes are intentionally deferred.** Wrapping `PeerId`,
+  `WorkspaceId`, and `SessionId`, plus using `NonZeroU32` for `top_k`/`limit`,
+  was deliberately left out of this release. Introducing these types later is
+  itself a breaking change, so this debt should be revisited and resolved
+  **before `1.0`**.
+
+### Migration guide
+
+Apply these one-line fixes, in order:
+
+1. **`http` imports** — remove any `use honcho_ai::http::*;` (and similar) and
+   switch to the public client API.
+2. **DTO renames** — replace `types::conclusion::Conclusion` with
+   `ConclusionResponse` and `types::session::Session` with `SessionResponse`.
+   Leave `honcho_ai::Conclusion` / `honcho_ai::Session` as-is.
+3. **`created_at()`** — drop the leading `*`/`&`: `let ts = msg.created_at();`.
+4. **Client entry points** — convert positional calls to builders:
+   `client.peer("a", None, None)` → `client.peer("a").build()`; pass config via
+   `.config(cfg).build()`. Note `search`'s default `limit` is now `10`.
+5. **`#[non_exhaustive]` DTOs/enums** — replace struct literals with the
+   builder/`Default`, and add a `_ => …` arm to any exhaustive `match`.
+6. **`HonchoError`** — for serde serialize failures, match the new
+   `Serialization` variant instead of `Configuration`/`Decode` (a wildcard arm
+   keeps compiling regardless).
+7. **Blocking filtered listings** — handle the `Page<…>` return of
+   `peers_with_filters` / `sessions_with_filters` (iterate/collect pages) rather
+   than assuming first-page-only results.
+
+## [0.1.6] - 2026-06-14
+
+A non-breaking hardening release. No API changes — a series of correctness,
+security, and robustness fixes across the transport, error, and domain layers
+(PRs #7–#11).
+
+### Fixed
+
+- **HTTP transport** — hardened the transport layer for security and
+  correctness.
+- **Error model** — hardened the error model and closed retry-semantics test
+  gaps.
+- **Blocking API** — eliminated panics and silent corruption in the sync
+  (blocking) API.
+- **Domain types** — improved correctness and consistency across the core
+  domain types.
+- **Types / serde** — serde forward-compatibility and validation hardening.
 
 ## [0.1.5] - 2026-05-28
 

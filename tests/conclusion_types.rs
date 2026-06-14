@@ -5,8 +5,8 @@ mod common;
 use common::{load_fixture, roundtrip, validate_openapi};
 
 use honcho_ai::types::conclusion::{
-    Conclusion, ConclusionBatchCreate, ConclusionCreate, ConclusionGet, ConclusionPage,
-    ConclusionQuery,
+    ConclusionBatchCreate, ConclusionCreate, ConclusionGet, ConclusionPage, ConclusionQuery,
+    ConclusionResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -85,12 +85,12 @@ fn page_conclusion_max_validates() {
 
 #[test]
 fn conclusion_roundtrip_min() {
-    roundtrip::<Conclusion>(load_fixture("Conclusion", "min"));
+    roundtrip::<ConclusionResponse>(load_fixture("Conclusion", "min"));
 }
 
 #[test]
 fn conclusion_roundtrip_max() {
-    roundtrip::<Conclusion>(load_fixture("Conclusion", "max"));
+    roundtrip::<ConclusionResponse>(load_fixture("Conclusion", "max"));
 }
 
 #[test]
