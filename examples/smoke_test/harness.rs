@@ -1,12 +1,26 @@
 use std::fmt;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use honcho_ai::Honcho;
+use honcho_ai::Message;
+use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::time::Duration;
 
+/// Maximum time the [`WorkspaceGuard`] waits for `delete_workspace` during
+/// `Drop`, so a hung server cannot wedge the whole smoke run on exit.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Aggregated pass/fail tally for the smoke suite.
+///
+/// Uses interior mutability (atomic counters + a mutex for the current
+/// scenario name) so every scenario `run()` takes `&self`/`&TestReport`
+/// instead of `&mut`. The suite is sequential today, but `&self` keeps the
+/// call sites uniform and leaves room for concurrent scenarios.
 pub struct TestReport {
     passed: AtomicUsize,
     failed: AtomicUsize,
-    current_scenario: std::sync::Mutex<String>,
+    current_scenario: Mutex<String>,
 }
 
 impl TestReport {
@@ -14,13 +28,13 @@ impl TestReport {
         Self {
             passed: AtomicUsize::new(0),
             failed: AtomicUsize::new(0),
-            current_scenario: std::sync::Mutex::new(String::new()),
+            current_scenario: Mutex::new(String::new()),
         }
     }
 
     pub fn scenario(&self, name: &str) {
         if let Ok(mut cur) = self.current_scenario.lock() {
-            name.clone_into(&mut *cur);
+            name.clone_into(&mut cur);
         }
         println!("--- {name} ---");
     }
@@ -32,11 +46,28 @@ impl TestReport {
 
     pub fn fail(&self, name: &str, err: &str) {
         self.failed.fetch_add(1, Ordering::Relaxed);
-        println!("  \u{2717} {name}: {err}");
+        // Prefix the failing test with the active scenario so interleaved CI
+        // logs stay attributable.
+        let scenario = self
+            .current_scenario
+            .lock()
+            .map(|cur| cur.clone())
+            .unwrap_or_default();
+        if scenario.is_empty() {
+            println!("  \u{2717} {name}: {err}");
+        } else {
+            println!("  \u{2717} [{scenario}] {name}: {err}");
+        }
     }
 
     pub fn failed_count(&self) -> usize {
         self.failed.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for TestReport {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -49,10 +80,21 @@ impl fmt::Display for TestReport {
     }
 }
 
+/// RAII guard that deletes the throwaway smoke-test workspace on `Drop`.
+///
+/// Because `main` returns an [`ExitCode`](std::process::ExitCode) instead of
+/// calling `process::exit`, this guard runs even when the suite fails, so no
+/// `smoke-test-*` workspace is leaked.
+///
+/// `Drop` needs a multi-thread tokio runtime: it uses `block_in_place` +
+/// `Handle::block_on`, which is only valid on a multi-thread runtime. It probes
+/// the current handle's [`RuntimeFlavor`] and only blocks when it is
+/// `MultiThread`. On a `current_thread` runtime (where `block_in_place` would
+/// panic) or outside tokio entirely it cannot block, so it degrades to an
+/// `eprintln!` warning rather than panicking during unwind.
 pub struct WorkspaceGuard {
     client: Honcho,
     workspace_id: String,
-    should_cleanup: std::sync::atomic::AtomicBool,
 }
 
 impl WorkspaceGuard {
@@ -60,39 +102,71 @@ impl WorkspaceGuard {
         Self {
             client,
             workspace_id,
-            should_cleanup: std::sync::atomic::AtomicBool::new(true),
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn workspace_id(&self) -> &str {
-        &self.workspace_id
-    }
-
-    #[allow(dead_code)]
-    pub fn client(&self) -> &Honcho {
-        &self.client
-    }
-
-    #[allow(dead_code)]
-    pub fn preserve(&self) {
-        self.should_cleanup.store(false, Ordering::Relaxed);
     }
 }
 
 impl Drop for WorkspaceGuard {
     fn drop(&mut self) {
-        if !self.should_cleanup.load(Ordering::Relaxed) {
+        let ws_id = &self.workspace_id;
+        // A multi-thread runtime handle is required to block here. Anything
+        // else (current_thread, or no runtime) must not panic in Drop.
+        let Ok(handle) = Handle::try_current() else {
+            eprintln!(
+                "  warning: no tokio runtime in Drop; workspace {ws_id} not cleaned up \
+                 (multi-thread runtime required)"
+            );
+            return;
+        };
+        // `block_in_place` panics on a current_thread runtime, so only block
+        // when the flavor is multi-thread; otherwise degrade to a warning.
+        if handle.runtime_flavor() != RuntimeFlavor::MultiThread {
+            eprintln!(
+                "  warning: not a multi-thread runtime in Drop; workspace {ws_id} not cleaned up \
+                 (multi-thread runtime required)"
+            );
             return;
         }
-        let client = self.client.clone();
-        let ws_id = self.workspace_id.clone();
         tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            match rt.block_on(client.delete_workspace(&ws_id)) {
-                Ok(()) => eprintln!("  cleaned up workspace {ws_id}"),
-                Err(e) => eprintln!("  warning: failed to delete workspace {ws_id}: {e}"),
+            let cleanup =
+                tokio::time::timeout(CLEANUP_TIMEOUT, self.client.delete_workspace(ws_id));
+            match handle.block_on(cleanup) {
+                Ok(Ok(())) => eprintln!("  cleaned up workspace {ws_id}"),
+                Ok(Err(e)) => eprintln!("  warning: failed to delete workspace {ws_id}: {e}"),
+                Err(_) => eprintln!(
+                    "  warning: timed out deleting workspace {ws_id} after {}s",
+                    CLEANUP_TIMEOUT.as_secs()
+                ),
             }
         });
+    }
+}
+
+/// Run a search closure with retry to ride out async message indexing, then
+/// assert the result is non-empty. Shared by the `messages` and `peer`
+/// scenarios so both use identical retry/backoff policy (5 attempts, linear
+/// `500ms * attempt` backoff).
+pub async fn assert_search_nonempty<F, Fut>(name: &str, report: &TestReport, mut search: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = honcho_ai::error::Result<Vec<Message>>>,
+{
+    let mut last_err: Option<String> = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+        }
+        match search().await {
+            Ok(results) if !results.is_empty() => {
+                report.pass(name);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    match last_err {
+        Some(e) => report.fail(name, &format!("persistent error: {e}")),
+        None => report.fail(name, "no results after retries (indexing may be slow)"),
     }
 }

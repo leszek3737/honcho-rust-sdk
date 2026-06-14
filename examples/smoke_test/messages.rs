@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::Cursor;
 
 use chrono::Utc;
@@ -8,9 +9,15 @@ use honcho_ai::types::message::{MessageConfiguration, MessageSearchOptions};
 use honcho_ai::{FileSource, Honcho};
 use serde_json::Value;
 
-use super::harness::TestReport;
+use super::harness::{TestReport, assert_search_nonempty};
 
-pub async fn run(honcho: &Honcho, report: &mut TestReport) {
+/// Term seeded into the session so the search tests assert on real hits rather
+/// than just "the endpoint did not throw".
+const SEARCH_TERM: &str = "Hello world";
+/// Query token guaranteed to match [`SEARCH_TERM`].
+const SEARCH_QUERY: &str = "Hello";
+
+pub async fn run(honcho: &Honcho, report: &TestReport) {
     report.scenario("messages");
 
     let peer = match honcho.peer("msg-peer").build().await {
@@ -30,6 +37,16 @@ pub async fn run(honcho: &Honcho, report: &mut TestReport) {
     if let Err(e) = session.add_peer(peer.id()).await {
         report.fail("setup_add_peer", &e.to_string());
         return;
+    }
+    // Seed a message containing the search term so the search tests can assert
+    // on a non-empty result, not merely that the endpoint did not throw.
+    match peer.message(SEARCH_TERM).build() {
+        Ok(msg) => {
+            if let Err(e) = session.add_messages(vec![msg]).await {
+                report.fail("setup_seed_search", &e.to_string());
+            }
+        }
+        Err(e) => report.fail("setup_seed_search", &e.to_string()),
     }
 
     test_message_create_via_peer(&peer, report);
@@ -73,9 +90,8 @@ fn test_message_create_via_peer(peer: &honcho_ai::Peer, report: &TestReport) {
 }
 
 fn test_message_create_with_metadata(peer: &honcho_ai::Peer, report: &TestReport) {
-    let mut meta = HashMap::new();
-    meta.insert("tag".to_owned(), Value::String("smoke".to_owned()));
-    match peer.message("tagged").metadata(meta.clone()).build() {
+    let meta = HashMap::from([("tag".to_owned(), Value::String("smoke".to_owned()))]);
+    match peer.message("tagged").metadata(meta).build() {
         Ok(msg) => {
             let match_meta = msg
                 .metadata
@@ -92,10 +108,18 @@ fn test_message_create_with_metadata(peer: &honcho_ai::Peer, report: &TestReport
 }
 
 fn test_message_create_with_configuration(peer: &honcho_ai::Peer, report: &TestReport) {
-    let mut reasoning = ReasoningConfiguration::default();
-    reasoning.enabled = Some(true);
-    let mut config = MessageConfiguration::default();
-    config.reasoning = Some(reasoning);
+    // `ReasoningConfiguration` / `MessageConfiguration` are `#[non_exhaustive]`
+    // with no builder, so a struct-update (FRU) literal won't compile in a
+    // downstream crate (E0639). The default-then-assign pattern is the only
+    // option here — SDK gap to address with builders in a future PR.
+    #[allow(clippy::field_reassign_with_default)]
+    let config = {
+        let mut reasoning = ReasoningConfiguration::default();
+        reasoning.enabled = Some(true);
+        let mut config = MessageConfiguration::default();
+        config.reasoning = Some(reasoning);
+        config
+    };
     match peer.message("reasoned").configuration(config).build() {
         Ok(msg) => {
             let has_reasoning = msg
@@ -118,10 +142,13 @@ fn test_message_create_with_created_at(peer: &honcho_ai::Peer, report: &TestRepo
     let now = Utc::now();
     match peer.message("timed").created_at(now).build() {
         Ok(msg) => {
-            if msg.created_at.is_some() {
+            if msg.created_at == Some(now) {
                 report.pass("message_create_with_created_at");
             } else {
-                report.fail("message_create_with_created_at", "created_at not set");
+                report.fail(
+                    "message_create_with_created_at",
+                    &format!("expected {:?}, got {:?}", Some(now), msg.created_at),
+                );
             }
         }
         Err(e) => report.fail("message_create_with_created_at", &e.to_string()),
@@ -158,28 +185,18 @@ async fn test_session_add_batch_messages(
     session: &honcho_ai::Session,
     report: &TestReport,
 ) {
-    let msg1 = match peer.message("batch-a").build() {
+    let built: Result<Vec<_>, _> = ["batch-a", "batch-b", "batch-c"]
+        .iter()
+        .map(|c| peer.message(*c).build())
+        .collect();
+    let msgs = match built {
         Ok(m) => m,
         Err(e) => {
             report.fail("session_add_batch_messages", &e.to_string());
             return;
         }
     };
-    let msg2 = match peer.message("batch-b").build() {
-        Ok(m) => m,
-        Err(e) => {
-            report.fail("session_add_batch_messages", &e.to_string());
-            return;
-        }
-    };
-    let msg3 = match peer.message("batch-c").build() {
-        Ok(m) => m,
-        Err(e) => {
-            report.fail("session_add_batch_messages", &e.to_string());
-            return;
-        }
-    };
-    match session.add_messages(vec![msg1, msg2, msg3]).await {
+    match session.add_messages(msgs).await {
         Ok(msgs) => {
             if msgs.len() == 3 {
                 report.pass("session_add_batch_messages");
@@ -210,12 +227,26 @@ async fn test_session_messages(session: &honcho_ai::Session, report: &TestReport
 async fn test_session_messages_page_info(session: &honcho_ai::Session, report: &TestReport) {
     match session.messages().await {
         Ok(page) => {
-            let _total = page.total();
-            let _page_num = page.page();
-            let _size = page.size();
-            let _pages = page.pages();
-            let _has_next = page.has_next();
-            report.pass("session_messages_page_info");
+            let mut detail = String::new();
+            if page.total() < 1 {
+                detail.push_str("total < 1; ");
+            }
+            // `has_next` must be consistent with page/pages bookkeeping.
+            let expected_has_next = page.page() < page.pages();
+            if page.has_next() != expected_has_next {
+                let _ = write!(
+                    detail,
+                    "has_next={} but page={} pages={}; ",
+                    page.has_next(),
+                    page.page(),
+                    page.pages()
+                );
+            }
+            if detail.is_empty() {
+                report.pass("session_messages_page_info");
+            } else {
+                report.fail("session_messages_page_info", &detail);
+            }
         }
         Err(e) => report.fail("session_messages_page_info", &e.to_string()),
     }
@@ -235,7 +266,9 @@ async fn test_session_messages_with_options(session: &honcho_ai::Session, report
 }
 
 async fn test_session_messages_pagination(session: &honcho_ai::Session, report: &TestReport) {
-    match session.messages().await {
+    // Force page size 1 so that, with multiple seeded messages, `has_next` is
+    // true and `next_page()` is actually exercised.
+    match session.messages_with_options(None, 1, 1, false).await {
         Ok(page) => {
             if page.has_next() {
                 match page.next_page().await {
@@ -247,6 +280,7 @@ async fn test_session_messages_pagination(session: &honcho_ai::Session, report: 
                     Err(e) => report.fail("session_messages_pagination", &e.to_string()),
                 }
             } else {
+                // size=1 with <=1 message: legitimately the last page.
                 report.pass("session_messages_pagination");
             }
         }
@@ -258,9 +292,14 @@ async fn test_session_messages_into_stream(session: &honcho_ai::Session, report:
     match session.messages().await {
         Ok(page) => {
             let stream = page.into_stream();
-            let all: Vec<_> = stream.collect::<Vec<_>>().await;
+            let all: Vec<_> = stream.collect().await;
             if all.is_empty() {
                 report.fail("session_messages_into_stream", "stream yielded nothing");
+            } else if all.iter().any(Result::is_err) {
+                report.fail(
+                    "session_messages_into_stream",
+                    "stream yielded one or more errors",
+                );
             } else {
                 report.pass("session_messages_into_stream");
             }
@@ -288,11 +327,11 @@ async fn test_session_get_message(
             return;
         }
     };
-    if added.is_empty() {
+    let Some(first) = added.first() else {
         report.fail("session_get_message", "no messages returned from add");
         return;
-    }
-    let msg_id = added[0].id();
+    };
+    let msg_id = first.id();
     match session.get_message(msg_id).await {
         Ok(fetched) => {
             if fetched.id() == msg_id {
@@ -324,13 +363,12 @@ async fn test_session_update_message(
             return;
         }
     };
-    if added.is_empty() {
+    let Some(first) = added.first() else {
         report.fail("session_update_message", "no messages returned from add");
         return;
-    }
-    let msg_id = added[0].id();
-    let mut update_meta = HashMap::new();
-    update_meta.insert("updated".to_owned(), Value::Bool(true));
+    };
+    let msg_id = first.id();
+    let update_meta = HashMap::from([("updated".to_owned(), Value::Bool(true))]);
     match session.update_message(msg_id, update_meta).await {
         Ok(updated) => {
             let has_updated = updated
@@ -348,71 +386,47 @@ async fn test_session_update_message(
 }
 
 async fn test_session_search(session: &honcho_ai::Session, report: &TestReport) {
-    match session.search("Hello").await {
-        Ok(results) => {
-            let _ = results;
-            report.pass("session_search");
-        }
-        Err(e) => report.fail("session_search", &e.to_string()),
-    }
+    assert_search_nonempty("session_search", report, || session.search(SEARCH_QUERY)).await;
 }
 
 async fn test_session_search_with_options(session: &honcho_ai::Session, report: &TestReport) {
     let opts = MessageSearchOptions::builder()
-        .query("Hello")
+        .query(SEARCH_QUERY)
         .limit(5)
         .build();
-    match session.search_with_options(&opts).await {
-        Ok(results) => {
-            let _ = results;
-            report.pass("session_search_with_options");
-        }
-        Err(e) => report.fail("session_search_with_options", &e.to_string()),
-    }
+    assert_search_nonempty("session_search_with_options", report, || {
+        session.search_with_options(&opts)
+    })
+    .await;
 }
 
 async fn test_peer_search(peer: &honcho_ai::Peer, report: &TestReport) {
-    match peer.search("Hello").await {
-        Ok(results) => {
-            let _ = results;
-            report.pass("peer_search");
-        }
-        Err(e) => report.fail("peer_search", &e.to_string()),
-    }
+    assert_search_nonempty("peer_search", report, || peer.search(SEARCH_QUERY)).await;
 }
 
 async fn test_peer_search_with_options(peer: &honcho_ai::Peer, report: &TestReport) {
     let opts = MessageSearchOptions::builder()
-        .query("Hello")
+        .query(SEARCH_QUERY)
         .limit(5)
         .build();
-    match peer.search_with_options(&opts).await {
-        Ok(results) => {
-            let _ = results;
-            report.pass("peer_search_with_options");
-        }
-        Err(e) => report.fail("peer_search_with_options", &e.to_string()),
-    }
+    assert_search_nonempty("peer_search_with_options", report, || {
+        peer.search_with_options(&opts)
+    })
+    .await;
 }
 
 async fn test_workspace_search(honcho: &Honcho, report: &TestReport) {
-    match honcho.search("Hello").build().await {
-        Ok(results) => {
-            let _ = results;
-            report.pass("workspace_search");
-        }
-        Err(e) => report.fail("workspace_search", &e.to_string()),
-    }
+    assert_search_nonempty("workspace_search", report, || {
+        honcho.search(SEARCH_QUERY).build()
+    })
+    .await;
 }
 
 async fn test_workspace_search_with_limit(honcho: &Honcho, report: &TestReport) {
-    match honcho.search("Hello").limit(5).build().await {
-        Ok(results) => {
-            let _ = results;
-            report.pass("workspace_search_with_limit");
-        }
-        Err(e) => report.fail("workspace_search_with_limit", &e.to_string()),
-    }
+    assert_search_nonempty("workspace_search_with_limit", report, || {
+        honcho.search(SEARCH_QUERY).limit(5).build()
+    })
+    .await;
 }
 
 async fn test_upload_file_bytes(
@@ -420,7 +434,7 @@ async fn test_upload_file_bytes(
     peer: &honcho_ai::Peer,
     report: &TestReport,
 ) {
-    let source = FileSource::bytes("test.txt", b"content".as_slice(), "text/plain");
+    let source = FileSource::bytes("test.txt", b"content", "text/plain");
     match session.upload_file(source).peer(peer.id()).send().await {
         Ok(msgs) => {
             if msgs.is_empty() {
@@ -461,7 +475,7 @@ async fn test_upload_file_with_metadata(
     peer: &honcho_ai::Peer,
     report: &TestReport,
 ) {
-    let source = FileSource::bytes("meta.txt", b"meta content".as_slice(), "text/plain");
+    let source = FileSource::bytes("meta.txt", b"meta content", "text/plain");
     let meta = serde_json::json!({"source": "upload"});
     match session
         .upload_file(source)
@@ -486,7 +500,7 @@ async fn test_upload_file_with_configuration(
     peer: &honcho_ai::Peer,
     report: &TestReport,
 ) {
-    let source = FileSource::bytes("cfg.txt", b"cfg content".as_slice(), "text/plain");
+    let source = FileSource::bytes("cfg.txt", b"cfg content", "text/plain");
     let config = serde_json::json!({"reasoning": {"enabled": true}});
     match session
         .upload_file(source)
@@ -526,26 +540,40 @@ async fn test_message_accessors(
             return;
         }
     };
-    if added.is_empty() {
+    let Some(m) = added.first() else {
         report.fail("message_accessors", "no messages returned");
         return;
+    };
+    let mut detail = String::new();
+    if m.id().is_empty() {
+        detail.push_str("id empty; ");
     }
-    let m = &added[0];
-    let _ = m.id();
-    let _ = m.content();
-    let _ = m.peer_id();
-    let _ = m.session_id();
+    if m.content() != "accessor-test" {
+        detail.push_str("content mismatch; ");
+    }
+    if m.peer_id() != peer.id() {
+        detail.push_str("peer_id mismatch; ");
+    }
+    if m.session_id() != session.id() {
+        detail.push_str("session_id mismatch; ");
+    }
+    if m.created_at().timestamp() == 0 {
+        detail.push_str("created_at zero; ");
+    }
+    if m.workspace_id() != workspace_id {
+        let _ = write!(
+            detail,
+            "workspace_id mismatch: expected {workspace_id}, got {}; ",
+            m.workspace_id()
+        );
+    }
+    // Just exercise the remaining accessors (no strong invariant available).
     let _ = m.metadata();
-    let _ = m.created_at();
     let _ = m.token_count();
-    let ws = m.workspace_id();
-    if ws == workspace_id {
+    if detail.is_empty() {
         report.pass("message_accessors");
     } else {
-        report.fail(
-            "message_accessors",
-            &format!("workspace_id mismatch: expected {workspace_id}, got {ws}"),
-        );
+        report.fail("message_accessors", &detail);
     }
 }
 
@@ -562,17 +590,17 @@ async fn test_message_display(
         }
     };
     let added = match session.add_messages(vec![msg]).await {
-        Ok(msgs) if !msgs.is_empty() => msgs,
-        Ok(_) => {
-            report.fail("message_display", "no messages returned");
-            return;
-        }
+        Ok(msgs) => msgs,
         Err(e) => {
             report.fail("message_display", &e.to_string());
             return;
         }
     };
-    let displayed = format!("{}", added[0]);
+    let Some(first) = added.first() else {
+        report.fail("message_display", "no messages returned");
+        return;
+    };
+    let displayed = first.to_string();
     if displayed.contains("display me") {
         report.pass("message_display");
     } else {
