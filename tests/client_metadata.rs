@@ -6,148 +6,198 @@
     missing_docs
 )]
 
+//! Workspace-level metadata & configuration: typed and raw get/set, the
+//! retry/backoff behaviour on transient 5xx, and constructor validation.
+
+mod common;
+
 use std::collections::HashMap;
 
-use honcho_ai::client::Honcho;
+use common::{TEST_WORKSPACE_ID, make_honcho, make_honcho_no_retry, mount_workspace_ensure};
+use honcho_ai::Honcho;
 use honcho_ai::error::HonchoError;
+use honcho_ai::types::common::ReasoningConfiguration;
 use honcho_ai::types::workspace::WorkspaceConfiguration;
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn workspace_response(
-    metadata: serde_json::Value,
-    configuration: serde_json::Value,
-) -> serde_json::Value {
+/// Path of the workspace resource for the shared test workspace.
+fn ws_path() -> String {
+    format!("/v3/workspaces/{TEST_WORKSPACE_ID}")
+}
+
+/// A full `Workspace` JSON body with caller-chosen `metadata` / `configuration`.
+///
+/// The shared [`common::workspace_response`] hard-codes empty objects, which the
+/// get-tests below cannot use because they assert on specific contents.
+fn workspace_body(metadata: Value, configuration: Value) -> Value {
     json!({
-        "id": "test-ws",
+        "id": TEST_WORKSPACE_ID,
         "metadata": metadata,
         "configuration": configuration,
         "created_at": "2025-01-15T10:30:00Z"
     })
 }
 
+// ── metadata: get ────────────────────────────────────────────────────────
+
 #[tokio::test]
 async fn gets_workspace_metadata_by_get() {
     let server = MockServer::start().await;
+    mount_workspace_ensure(&server, 1).await;
 
-    let metadata = json!({"env": "production", "team": "core"});
-    let response = workspace_response(metadata, json!({}));
-
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
-        )
-        .mount(&server)
-        .await;
-
+    let body = workspace_body(json!({"env": "production", "team": "core"}), json!({}));
     Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .and(path(ws_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-    let result = honcho.get_metadata().await.unwrap();
+    let result = make_honcho(&server.uri()).get_metadata().await.unwrap();
 
-    assert_eq!(result.get("env").unwrap().as_str(), Some("production"));
-    assert_eq!(result.get("team").unwrap().as_str(), Some("core"));
+    assert_eq!(result.get("env"), Some(&json!("production")));
+    assert_eq!(result.get("team"), Some(&json!("core")));
 }
 
 #[tokio::test]
 async fn get_metadata_empty_when_no_metadata() {
     let server = MockServer::start().await;
-
-    let response = workspace_response(json!({}), json!({}));
-
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
-        )
-        .mount(&server)
-        .await;
+    mount_workspace_ensure(&server, 1).await;
 
     Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .and(path(ws_path()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), json!({}))),
+        )
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-    let result = honcho.get_metadata().await.unwrap();
+    let result = make_honcho(&server.uri()).get_metadata().await.unwrap();
 
     assert!(result.is_empty());
 }
+
+#[tokio::test]
+async fn get_metadata_surfaces_decode_error_on_malformed_json() {
+    let server = MockServer::start().await;
+    mount_workspace_ensure(&server, 1).await;
+
+    // 200 OK but a body that is not valid JSON must surface as a decode error,
+    // never silently as an empty map.
+    Mock::given(method("GET"))
+        .and(path(ws_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{ not valid json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = make_honcho(&server.uri()).get_metadata().await.unwrap_err();
+
+    assert!(
+        matches!(err, HonchoError::Decode { .. }),
+        "expected Decode, got {err:?}"
+    );
+}
+
+// ── metadata: set ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn set_metadata_puts_to_workspace_id() {
     let server = MockServer::start().await;
 
     let metadata = json!({"env": "staging"});
-    let response = workspace_response(metadata.clone(), json!({}));
-
+    // `set_metadata` is a pure write: it does NOT lazily ensure the workspace.
     Mock::given(method("PUT"))
-        .and(path("/v3/workspaces/test-ws"))
+        .and(path(ws_path()))
         .and(body_json(json!({"metadata": metadata})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_body(metadata.clone(), json!({}))),
+        )
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-
-    let mut meta = HashMap::new();
-    meta.insert("env".to_string(), json!("staging"));
-    honcho.set_metadata(meta).await.unwrap();
+    make_honcho(&server.uri())
+        .set_metadata(HashMap::from([("env".to_string(), json!("staging"))]))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn set_metadata_server_error_returns_error() {
     let server = MockServer::start().await;
 
+    // Disable retries so a single 503 is observed exactly once and the test
+    // does not sleep through any backoff.
+    let honcho = make_honcho_no_retry(&server.uri());
+
     Mock::given(method("PUT"))
+        .and(path(ws_path()))
         .respond_with(ResponseTemplate::new(503))
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
+    let err = honcho
+        .set_metadata(HashMap::from([("env".to_string(), json!("staging"))]))
+        .await
+        .unwrap_err();
 
-    let mut meta = HashMap::new();
-    meta.insert("env".to_string(), json!("staging"));
-    let err = honcho.set_metadata(meta).await.unwrap_err();
     assert!(
-        matches!(
-            err,
-            honcho_ai::error::HonchoError::Server { status: 503, .. }
-        ),
+        matches!(err, HonchoError::Server { status: 503, .. }),
         "expected Server(503), got {err:?}"
     );
 }
 
 #[tokio::test]
-async fn gets_workspace_configuration_by_get() {
+async fn set_metadata_retries_503_until_exhausted() {
     let server = MockServer::start().await;
 
-    let config = json!({"reasoning": {"enabled": true}});
-    let response = workspace_response(json!({}), config);
-
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
-        )
+    // PUT is idempotent, so a 503 is retried. The default policy is 2 retries,
+    // i.e. 1 initial attempt + 2 retries = 3 requests. `retry-after: 0` pins the
+    // backoff to zero, so the call-count assertion is deterministic and the test
+    // does not sleep (a paused clock can't be used here: it would fire reqwest's
+    // request timeout before the real wiremock socket responds).
+    Mock::given(method("PUT"))
+        .and(path(ws_path()))
+        .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+        .expect(3)
         .mount(&server)
         .await;
 
+    let err = make_honcho(&server.uri())
+        .set_metadata(HashMap::from([("env".to_string(), json!("staging"))]))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, HonchoError::Server { status: 503, .. }),
+        "expected Server(503), got {err:?}"
+    );
+}
+
+// ── configuration: typed get/set ─────────────────────────────────────────
+
+#[tokio::test]
+async fn gets_workspace_configuration_by_get() {
+    let server = MockServer::start().await;
+    mount_workspace_ensure(&server, 1).await;
+
+    let body = workspace_body(json!({}), json!({"reasoning": {"enabled": true}}));
     Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .and(path(ws_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-    let result = honcho.get_configuration().await.unwrap();
+    let result = make_honcho(&server.uri())
+        .get_configuration()
+        .await
+        .unwrap();
 
     assert_eq!(result.reasoning.as_ref().unwrap().enabled, Some(true));
 }
@@ -155,25 +205,21 @@ async fn gets_workspace_configuration_by_get() {
 #[tokio::test]
 async fn get_configuration_empty_when_no_configuration() {
     let server = MockServer::start().await;
-
-    let response = workspace_response(json!({}), json!({}));
-
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
-        )
-        .mount(&server)
-        .await;
+    mount_workspace_ensure(&server, 1).await;
 
     Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .and(path(ws_path()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), json!({}))),
+        )
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-    let result = honcho.get_configuration().await.unwrap();
+    let result = make_honcho(&server.uri())
+        .get_configuration()
+        .await
+        .unwrap();
 
     assert!(result.reasoning.is_none());
     assert!(result.peer_card.is_none());
@@ -182,154 +228,205 @@ async fn get_configuration_empty_when_no_configuration() {
 }
 
 #[tokio::test]
-async fn gets_workspace_configuration_raw_by_get() {
-    let server = MockServer::start().await;
-
-    let config = json!({"unknown_future_field": {"enabled": true}});
-    let response = workspace_response(json!({}), config);
-
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
-        )
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/test-ws"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
-        .mount(&server)
-        .await;
-
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-    let result = honcho.get_configuration_raw().await.unwrap();
-
-    assert_eq!(
-        result.get("unknown_future_field").unwrap(),
-        &json!({"enabled": true})
-    );
-}
-
-#[tokio::test]
 async fn set_configuration_puts_to_workspace_id() {
     let server = MockServer::start().await;
 
-    let config = json!({"reasoning": {"enabled": false}});
-    let response = workspace_response(json!({}), config.clone());
-
+    let wire = json!({"reasoning": {"enabled": false}});
     Mock::given(method("PUT"))
-        .and(path("/v3/workspaces/test-ws"))
-        .and(body_json(json!({"configuration": config})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
-        .mount(&server)
-        .await;
-
-    let honcho = Honcho::new(&server.uri(), "test-ws").unwrap();
-
-    let cfg: WorkspaceConfiguration =
-        serde_json::from_value(json!({"reasoning": {"enabled": false}})).unwrap();
-    honcho.set_configuration(&cfg).await.unwrap();
-}
-
-#[tokio::test]
-async fn workspace_id_accessor() {
-    let server = MockServer::start().await;
-    let honcho = Honcho::new(&server.uri(), "my-workspace").unwrap();
-    assert_eq!(honcho.workspace_id(), "my-workspace");
-}
-
-#[tokio::test]
-async fn get_metadata_returns_error_when_get_fails() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
+        .and(path(ws_path()))
+        .and(body_json(json!({"configuration": wire})))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
+            ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), wire.clone())),
         )
+        .expect(1)
         .mount(&server)
         .await;
 
+    // Build the typed config directly; both types are `#[non_exhaustive]`, so
+    // start from `Default` and assign fields.
+    let mut reasoning = ReasoningConfiguration::default();
+    reasoning.enabled = Some(false);
+    let mut config = WorkspaceConfiguration::default();
+    config.reasoning = Some(reasoning);
+
+    make_honcho(&server.uri())
+        .set_configuration(&config)
+        .await
+        .unwrap();
+}
+
+// ── configuration: raw get/set ───────────────────────────────────────────
+
+#[tokio::test]
+async fn gets_workspace_configuration_raw_by_get() {
+    let server = MockServer::start().await;
+    mount_workspace_ensure(&server, 1).await;
+
+    let body = workspace_body(
+        json!({}),
+        json!({"unknown_future_field": {"enabled": true}}),
+    );
     Mock::given(method("GET"))
-        .and(path("/v3/workspaces/nonexistent"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
+        .and(path(ws_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
         .mount(&server)
         .await;
 
-    let honcho = Honcho::new(&server.uri(), "nonexistent").unwrap();
-    let err = honcho.get_metadata().await.unwrap_err();
+    let result = make_honcho(&server.uri())
+        .get_configuration_raw()
+        .await
+        .unwrap();
 
-    assert!(
-        matches!(err, HonchoError::NotFound { .. }),
-        "expected NotFound, got {err:?}"
+    assert_eq!(
+        result.get("unknown_future_field"),
+        Some(&json!({"enabled": true}))
     );
 }
 
 #[tokio::test]
-async fn get_configuration_returns_error_when_get_fails() {
-    let server = MockServer::start().await;
+async fn get_configuration_raw_falls_back_to_empty_map() {
+    // The raw getter must degrade to an empty map (never panic) when the
+    // `configuration` field is null, absent, or the whole body is not an object.
+    let cases: [(&str, Value); 3] = [
+        ("null configuration", workspace_body(json!({}), Value::Null)),
+        (
+            "missing configuration key",
+            json!({"id": TEST_WORKSPACE_ID, "metadata": {}, "created_at": "2025-01-15T10:30:00Z"}),
+        ),
+        ("non-object body", json!([1, 2, 3])),
+    ];
 
-    Mock::given(method("POST"))
-        .and(path("/v3/workspaces"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(json!({}), json!({}))),
-        )
-        .mount(&server)
-        .await;
+    for (label, body) in cases {
+        let server = MockServer::start().await;
+        mount_workspace_ensure(&server, 1).await;
 
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/nonexistent"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
-        .mount(&server)
-        .await;
+        Mock::given(method("GET"))
+            .and(path(ws_path()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
 
-    let honcho = Honcho::new(&server.uri(), "nonexistent").unwrap();
-    let err = honcho.get_configuration().await.unwrap_err();
+        let result = make_honcho(&server.uri())
+            .get_configuration_raw()
+            .await
+            .unwrap();
 
-    assert!(
-        matches!(err, HonchoError::NotFound { .. }),
-        "expected NotFound, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn honcho_constructor_rejects_invalid_url() {
-    let result = Honcho::new("not a url", "test-ws");
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn honcho_constructor_rejects_invalid_base_urls() {
-    for base_url in ["localhost:8000", "ftp://example.com", "http://"] {
-        let result = Honcho::new(base_url, "test-ws");
-        assert!(result.is_err(), "accepted base_url: {base_url}");
+        assert!(result.is_empty(), "case {label:?}: expected empty map");
     }
 }
 
 #[tokio::test]
-async fn honcho_constructor_normalizes_subpath_trailing_slash() {
+async fn set_configuration_raw_puts_to_workspace_id() {
+    let server = MockServer::start().await;
+
+    let wire = json!({"unknown_future_field": {"enabled": true}});
+    Mock::given(method("PUT"))
+        .and(path(ws_path()))
+        .and(body_json(json!({"configuration": wire})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), wire.clone())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config = HashMap::from([("unknown_future_field".to_string(), json!({"enabled": true}))]);
+
+    make_honcho(&server.uri())
+        .set_configuration_raw(config)
+        .await
+        .unwrap();
+}
+
+// ── get failures (table-driven across the read operations) ───────────────
+
+#[tokio::test]
+async fn get_operations_return_error_when_get_fails() {
+    // `get_metadata`, `get_configuration`, and `get_configuration_raw` share the
+    // ensure-then-GET shape, so a 404 on the GET must surface identically.
+    for op in ["metadata", "configuration", "configuration_raw"] {
+        let server = MockServer::start().await;
+        mount_workspace_ensure(&server, 1).await;
+
+        Mock::given(method("GET"))
+            .and(path(ws_path()))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let honcho = make_honcho(&server.uri());
+        // `.err()` erases the differing `Ok` types into a common `Option<_>`.
+        let err = match op {
+            "metadata" => honcho.get_metadata().await.err(),
+            "configuration" => honcho.get_configuration().await.err(),
+            _ => honcho.get_configuration_raw().await.err(),
+        }
+        .unwrap();
+
+        assert!(
+            matches!(err, HonchoError::NotFound { .. }),
+            "op {op}: expected NotFound, got {err:?}"
+        );
+    }
+}
+
+// ── constructor validation (synchronous, no server) ──────────────────────
+
+#[test]
+fn workspace_id_accessor() {
+    let honcho = Honcho::new("http://localhost:8000", "my-workspace").unwrap();
+    assert_eq!(honcho.workspace_id(), "my-workspace");
+}
+
+#[test]
+fn honcho_constructor_rejects_invalid_url() {
+    assert!(Honcho::new("not a url", "test-ws").is_err());
+}
+
+#[test]
+fn honcho_constructor_rejects_invalid_base_urls() {
+    for base_url in ["localhost:8000", "ftp://example.com", "http://"] {
+        assert!(
+            Honcho::new(base_url, "test-ws").is_err(),
+            "accepted base_url: {base_url}"
+        );
+    }
+}
+
+#[test]
+fn honcho_constructor_normalizes_subpath_trailing_slash() {
     let honcho = Honcho::new("http://localhost:8000/api/", "test-ws").unwrap();
     assert_eq!(honcho.base_url().as_str(), "http://localhost:8000/api");
 }
 
-#[tokio::test]
-async fn honcho_constructor_rejects_invalid_workspace_ids() {
+#[test]
+fn honcho_constructor_rejects_invalid_workspace_ids() {
     for workspace_id in ["", "has space", "slash/id", "nonascii-é"] {
-        let result = Honcho::new("http://localhost:8000", workspace_id);
-        assert!(result.is_err(), "accepted workspace_id: {workspace_id}");
+        assert!(
+            Honcho::new("http://localhost:8000", workspace_id).is_err(),
+            "accepted workspace_id: {workspace_id}"
+        );
     }
 }
 
-#[tokio::test]
-async fn honcho_constructor_rejects_too_long_workspace_id() {
-    let workspace_id = "a".repeat(513);
-    let result = Honcho::new("http://localhost:8000", &workspace_id);
-    assert!(result.is_err());
+#[test]
+fn honcho_constructor_workspace_id_length_boundary() {
+    // 512 is the inclusive maximum; 513 must be rejected.
+    assert!(
+        Honcho::new("http://localhost:8000", &"a".repeat(512)).is_ok(),
+        "512-char workspace_id should be accepted"
+    );
+    assert!(
+        Honcho::new("http://localhost:8000", &"a".repeat(513)).is_err(),
+        "513-char workspace_id should be rejected"
+    );
 }
 
-#[tokio::test]
-async fn honcho_constructor_accepts_valid_workspace_id() {
+#[test]
+fn honcho_constructor_accepts_valid_workspace_id() {
     let honcho = Honcho::new("http://localhost:8000", "abc-XYZ_123").unwrap();
     assert_eq!(honcho.workspace_id(), "abc-XYZ_123");
 }

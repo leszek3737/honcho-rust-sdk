@@ -12,47 +12,30 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use honcho_ai::ConclusionCreateParams;
+use honcho_ai::error::HonchoError;
 use honcho_ai::session::PeerSpec;
 use honcho_ai::types::session::{SessionConfiguration, SessionPeerConfig};
 use serde_json::json;
 
-use crate::common::try_client;
+use crate::common::{WorkspaceGuard, try_client};
 
-struct WorkspaceGuard {
-    client: Option<honcho_ai::Honcho>,
+/// Spins up an isolated workspace client wrapped in the shared, awaited
+/// [`WorkspaceGuard`], or returns `None` when no server is reachable (the
+/// caller then self-skips).
+///
+/// The guard's `Drop` deletes the whole workspace via a blocking
+/// `block_in_place` + `block_on`, so every test that uses it MUST run on a
+/// `#[tokio::test(flavor = "multi_thread")]` runtime.
+async fn guarded_client() -> Option<WorkspaceGuard> {
+    Some(WorkspaceGuard::new(try_client().await?))
 }
 
-impl WorkspaceGuard {
-    fn new(client: honcho_ai::Honcho) -> Self {
-        Self {
-            client: Some(client),
-        }
-    }
-
-    fn inner(&self) -> &honcho_ai::Honcho {
-        self.client.as_ref().unwrap()
-    }
-}
-
-impl Drop for WorkspaceGuard {
-    fn drop(&mut self) {
-        if let Some(client) = self.client.take() {
-            let ws_id = client.workspace_id().to_string();
-            let rt = tokio::runtime::Handle::current();
-            rt.spawn(async move {
-                let _ = client.delete_workspace(&ws_id).await;
-            });
-        }
-    }
-}
-
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn full_lifecycle() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let peer_a = client.peer("lifecycle-alice").build().await.unwrap();
     assert_eq!(peer_a.id(), "lifecycle-alice");
@@ -85,13 +68,50 @@ async fn full_lifecycle() {
     let created = session.add_messages(vec![msg_a, msg_b]).await.unwrap();
     assert_eq!(created.len(), 2);
 
-    let messages = session.messages().await.unwrap();
-    assert!(!messages.items().is_empty());
+    // Listing returns exactly the two messages, attributed to their authors.
+    let listed = session.messages().await.unwrap().items();
+    assert_eq!(
+        listed.len(),
+        2,
+        "expected exactly the two messages just added"
+    );
+    let author_ids: HashSet<&str> = listed.iter().map(honcho_ai::Message::peer_id).collect();
+    assert_eq!(
+        author_ids,
+        HashSet::from(["lifecycle-alice", "lifecycle-bob"])
+    );
 
-    let _ctx = session.context().await.unwrap();
+    // Context echoes the session id and carries the messages we added.
+    let ctx = session.context().await.unwrap();
+    assert_eq!(ctx.id, session.id());
+    assert!(
+        !ctx.messages.is_empty(),
+        "session context should include the session messages"
+    );
 
-    let search_results = session.search("Hello").await.unwrap();
-    assert!(!search_results.is_empty());
+    // Search is eventually consistent: retry until the indexed messages surface.
+    let mut search_results = Vec::new();
+    let mut delay = Duration::from_millis(500);
+    let max_attempts = 5;
+    for attempt in 0..max_attempts {
+        match session.search("Hello").await {
+            Ok(r) if !r.is_empty() => {
+                search_results = r;
+                break;
+            }
+            // Not indexed yet, or a transient 5xx: back off and retry.
+            Ok(_) | Err(HonchoError::Server { .. }) => {}
+            Err(e) => panic!("search('Hello') failed: {e}"),
+        }
+        if attempt + 1 < max_attempts {
+            tokio::time::sleep(delay).await;
+            delay *= 2;
+        }
+    }
+    assert!(
+        !search_results.is_empty(),
+        "search('Hello') returned no results after {max_attempts} attempts"
+    );
 
     let mut meta = HashMap::new();
     meta.insert("updated".to_owned(), json!(true));
@@ -99,17 +119,43 @@ async fn full_lifecycle() {
     let refreshed = peer_a.get_metadata().await.unwrap();
     assert_eq!(refreshed.get("updated").unwrap(), &json!(true));
 
+    // Zero-alloc membership checks over the raw page slices.
     let peers_page = client.peers().await.unwrap();
-    let peer_ids: Vec<String> = peers_page.items().into_iter().map(|p| p.id).collect();
-    assert!(peer_ids.contains(&"lifecycle-alice".to_string()));
-    assert!(peer_ids.contains(&"lifecycle-bob".to_string()));
+    assert!(
+        peers_page
+            .items_ref()
+            .iter()
+            .any(|p| p.id == "lifecycle-alice")
+    );
+    assert!(
+        peers_page
+            .items_ref()
+            .iter()
+            .any(|p| p.id == "lifecycle-bob")
+    );
 
     let sessions_page = client.sessions().await.unwrap();
-    let session_ids: Vec<String> = sessions_page.items().into_iter().map(|s| s.id).collect();
-    assert!(session_ids.contains(&"lifecycle-session".to_string()));
+    assert!(
+        sessions_page
+            .items_ref()
+            .iter()
+            .any(|s| s.id == "lifecycle-session")
+    );
 
     let fetched = session.get_message(created[0].id()).await.unwrap();
     assert_eq!(fetched.id(), created[0].id());
+
+    // Error path: a well-formed but unknown id must surface NotFound (404),
+    // not just "some error" — assert the variant + status per the suite contract.
+    let missing_err = session
+        .get_message("00000000-0000-0000-0000-000000000000")
+        .await
+        .expect_err("get_message on an unknown id must fail");
+    assert_eq!(missing_err.status_code(), Some(404));
+    assert!(
+        matches!(missing_err, HonchoError::NotFound { .. }),
+        "unknown message id must surface NotFound, got {missing_err:?}"
+    );
 
     let mut update_meta = HashMap::new();
     update_meta.insert("edited".to_owned(), json!(true));
@@ -120,16 +166,14 @@ async fn full_lifecycle() {
     assert_eq!(updated_msg.metadata().get("edited").unwrap(), &json!(true));
 
     session.delete().await.unwrap();
-    drop(guard);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn peer_metadata_and_configuration_crud() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let peer = client.peer("meta-test-peer").build().await.unwrap();
 
@@ -140,6 +184,7 @@ async fn peer_metadata_and_configuration_crud() {
 
     let fetched = peer.get_metadata().await.unwrap();
     assert_eq!(fetched.get("role").unwrap(), &json!("tester"));
+    assert_eq!(fetched.get("version").unwrap(), &json!(2));
 
     let mut config = HashMap::new();
     config.insert("language".to_owned(), json!("en"));
@@ -148,22 +193,29 @@ async fn peer_metadata_and_configuration_crud() {
     let fetched_config_raw = peer.get_configuration_raw().await.unwrap();
     assert_eq!(fetched_config_raw.get("language").unwrap(), &json!("en"));
 
+    // `update` is a full PUT replace, not a partial merge: keys absent from the
+    // new map are dropped, so the prior `role`/`version` must be gone afterwards.
     let mut patch_meta = HashMap::new();
     patch_meta.insert("patched".to_owned(), json!(true));
     peer.update(patch_meta).await.unwrap();
     let after_patch = peer.get_metadata().await.unwrap();
     assert_eq!(after_patch.get("patched").unwrap(), &json!(true));
-
-    drop(guard);
+    assert!(
+        !after_patch.contains_key("role"),
+        "update() must replace metadata, not merge"
+    );
+    assert!(
+        !after_patch.contains_key("version"),
+        "update() must replace metadata, not merge"
+    );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn session_clone_and_summaries() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let peer = client.peer("clone-test-peer").build().await.unwrap();
     let session = client.session("clone-test-session").build().await.unwrap();
@@ -174,19 +226,24 @@ async fn session_clone_and_summaries() {
 
     let cloned = match session.clone_session().await {
         Ok(c) => c,
-        Err(honcho_ai::error::HonchoError::Server { .. }) => {
+        Err(HonchoError::Server { .. }) => {
             eprintln!("skipping clone test: server clone endpoint returned 5xx");
-            session.delete().await.ok();
             return;
         }
         Err(e) => panic!("clone_session failed with non-server error: {e}"),
     };
     assert_ne!(cloned.id(), session.id());
 
-    let cloned_with_msg = session
-        .clone_session_with_message(created[0].id())
-        .await
-        .unwrap();
+    // Same 5xx tolerance as `clone_session` above: a transient server fault must
+    // skip the test, not panic. The guard's Drop still deletes the workspace.
+    let cloned_with_msg = match session.clone_session_with_message(created[0].id()).await {
+        Ok(c) => c,
+        Err(HonchoError::Server { .. }) => {
+            eprintln!("skipping clone-with-message test: server clone endpoint returned 5xx");
+            return;
+        }
+        Err(e) => panic!("clone_session_with_message failed with non-server error: {e}"),
+    };
     assert_ne!(cloned_with_msg.id(), session.id());
 
     let summaries = session.summaries().await.unwrap();
@@ -195,16 +252,14 @@ async fn session_clone_and_summaries() {
     session.delete().await.unwrap();
     cloned.delete().await.unwrap();
     cloned_with_msg.delete().await.unwrap();
-    drop(guard);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn session_metadata_and_configuration() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let session = client.session("meta-test-session").build().await.unwrap();
 
@@ -226,16 +281,14 @@ async fn session_metadata_and_configuration() {
     assert_eq!(fetched_config.summary.unwrap().enabled, Some(true));
 
     session.delete().await.unwrap();
-    drop(guard);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn peer_representation_and_context() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let peer = client.peer("repr-test-peer").build().await.unwrap();
     let session = client.session("repr-test-session").build().await.unwrap();
@@ -262,19 +315,18 @@ async fn peer_representation_and_context() {
         }
     }
 
-    let _ctx = peer.context().await.unwrap();
+    let ctx = peer.context().await.unwrap();
+    assert_eq!(ctx.peer_id, peer.id());
 
     session.delete().await.unwrap();
-    drop(guard);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn workspace_metadata_and_configuration() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let mut meta = HashMap::new();
     meta.insert("env".to_owned(), json!("integration-test"));
@@ -287,15 +339,14 @@ async fn workspace_metadata_and_configuration() {
     client.set_configuration_raw(config).await.unwrap();
     let fetched_config = client.get_configuration_raw().await.unwrap();
     assert_eq!(fetched_config.get("feature_x").unwrap(), &json!(true));
-
-    drop(guard);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn session_per_peer_configuration() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
+    let client = guard.client();
 
     let session = client.session("peer-cfg-session").build().await.unwrap();
     session.add_peer("peer-cfg-a").await.unwrap();
@@ -312,20 +363,18 @@ async fn session_per_peer_configuration() {
     assert_eq!(fetched.observe_others, Some(false));
 
     session.delete().await.unwrap();
-    client.delete_workspace(client.workspace_id()).await.ok();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn conclusion_query_with_distance_filter() {
-    let Some(client) = try_client().await else {
+    let Some(guard) = guarded_client().await else {
         return;
     };
-    let guard = WorkspaceGuard::new(client);
-    let client = guard.inner();
+    let client = guard.client();
 
     let observer = client.peer("conc-observer").build().await.unwrap();
-
-    let _observed = client.peer("conc-observed").build().await.unwrap();
+    let observed_peer = client.peer("conc-observed").build().await.unwrap();
+    assert_eq!(observed_peer.id(), "conc-observed");
 
     let scope = observer.conclusions_of("conc-observed");
 
@@ -338,12 +387,15 @@ async fn conclusion_query_with_distance_filter() {
         .await
         .unwrap();
 
-    // small delay for indexing
+    // Small delay to let the server index the freshly created conclusions.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // Retry the distance-bounded query: indexing is eventually consistent and
+    // the endpoint may briefly return a transient 5xx.
     let max_attempts = 5;
     let mut delay = Duration::from_millis(500);
     let mut results = Vec::new();
+    let mut last_server_error: Option<String> = None;
 
     for attempt in 0..max_attempts {
         match scope
@@ -357,29 +409,64 @@ async fn conclusion_query_with_distance_filter() {
                 results = r;
                 break;
             }
-            Ok(_) | Err(honcho_ai::error::HonchoError::Server { .. })
-                if attempt + 1 < max_attempts =>
-            {
-                tokio::time::sleep(delay).await;
-                delay *= 2;
+            // Empty result: not indexed yet, back off and retry.
+            Ok(_) => {}
+            // Transient 5xx: tolerate and retry, remembering it in case every
+            // attempt fails the same way.
+            Err(HonchoError::Server { status, message }) => {
+                last_server_error = Some(format!("HTTP {status} {message}"));
             }
-            Ok(_) => break,
             Err(e) => panic!("conclusion query failed: {e}"),
+        }
+        if attempt + 1 < max_attempts {
+            tokio::time::sleep(delay).await;
+            delay *= 2;
         }
     }
 
-    // verify we got at least one result (if server indexed in time)
-    if !results.is_empty() {
-        assert!(results.iter().any(|c| c.content().contains("coffee")));
+    if results.is_empty() {
+        // A pure server-side fault is tolerated as a skip (the guard still
+        // deletes the workspace on return). An empty-but-successful response,
+        // however, means the headline distance query is broken: fail loudly.
+        if let Some(err) = last_server_error {
+            eprintln!("skipping conclusion distance query assert: server returned {err}");
+            return;
+        }
+        panic!(
+            "distance query returned no conclusions after {max_attempts} attempts (feature broken)"
+        );
     }
 
-    // list conclusions
-    let page = scope.list().send().await.unwrap();
-    assert!(page.items().len() >= 3);
+    // Contract: the distance-filtered query must surface the coffee conclusion.
+    assert!(
+        results.iter().any(|c| c.content().contains("coffee")),
+        "distance query did not return the expected 'coffee' conclusion"
+    );
 
-    // clean up
-    for c in &page.items() {
+    // A distance bound only narrows results: an unfiltered query must return at
+    // least as many conclusions as the bounded one. Only a transient server-side
+    // 5xx (e.g. eventual consistency) is tolerated as a skip; any other error is
+    // a real client/logic fault and must fail the test.
+    match scope.query("coffee preferences").top_k(5).send().await {
+        Ok(unfiltered) => assert!(
+            unfiltered.len() >= results.len(),
+            "distance filter returned more results than the unfiltered query"
+        ),
+        Err(HonchoError::Server { status, message }) => {
+            eprintln!(
+                "skipping unfiltered superset assert: server returned HTTP {status} {message}"
+            );
+        }
+        Err(e) => panic!("unfiltered conclusion query failed: {e}"),
+    }
+
+    let page = scope.list().send().await.unwrap();
+    let listed = page.items();
+    assert!(
+        listed.len() >= 3,
+        "expected at least the three created conclusions"
+    );
+    for c in &listed {
         scope.delete(c.id.clone()).await.ok();
     }
-    drop(guard);
 }
