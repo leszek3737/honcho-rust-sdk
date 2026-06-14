@@ -6,7 +6,7 @@ use common::{load_fixture, roundtrip, validate_openapi};
 use honcho_ai::types::session::{
     Session, SessionConfiguration, SessionContext, SessionContextOptions, SessionCreate,
     SessionGet, SessionPage, SessionPeerConfig, SessionQueueStatus, SessionSummaries,
-    SessionUpdate, Summary, SummaryConfiguration,
+    SessionUpdate, Summary, SummaryConfiguration, SummaryType,
 };
 
 macro_rules! schema_tests {
@@ -126,6 +126,68 @@ fn session_context_options_roundtrip_min() {
 fn session_context_options_roundtrip_max() {
     let fixture = load_fixture("SessionContextOptions", "max");
     roundtrip::<SessionContextOptions>(fixture);
+}
+
+// ── forward-compatibility ────────────────────────────────────────────
+
+#[test]
+fn unknown_summary_type_deserializes_to_unknown() {
+    // A summary type added server-side must not fail deserialization.
+    let json = serde_json::json!({
+        "content": "x",
+        "message_id": "m0",
+        "summary_type": "medium",
+        "created_at": "2025-01-15T10:30:00Z",
+        "token_count": 1
+    });
+    let summary: Summary = serde_json::from_value(json).unwrap();
+    assert_eq!(summary.summary_type, SummaryType::Unknown);
+}
+
+#[test]
+fn session_context_with_unknown_summary_type_deserializes() {
+    // The whole SessionContext must deserialize even with an unknown summary type.
+    let json = serde_json::json!({
+        "id": "s1",
+        "messages": [],
+        "summary": {
+            "content": "x",
+            "message_id": "m0",
+            "summary_type": "brand_new_kind",
+            "created_at": "2025-01-15T10:30:00Z",
+            "token_count": 1
+        }
+    });
+    let ctx: SessionContext = serde_json::from_value(json).unwrap();
+    assert_eq!(ctx.summary.unwrap().summary_type, SummaryType::Unknown);
+}
+
+#[test]
+fn known_summary_types_still_deserialize() {
+    let short: Summary = serde_json::from_value(serde_json::json!({
+        "content": "x", "message_id": "m0", "summary_type": "short",
+        "created_at": "2025-01-15T10:30:00Z", "token_count": 1
+    }))
+    .unwrap();
+    assert_eq!(short.summary_type, SummaryType::Short);
+    let long: Summary = serde_json::from_value(serde_json::json!({
+        "content": "x", "message_id": "m0", "summary_type": "long",
+        "created_at": "2025-01-15T10:30:00Z", "token_count": 1
+    }))
+    .unwrap();
+    assert_eq!(long.summary_type, SummaryType::Long);
+}
+
+#[test]
+fn session_peer_config_accepts_unknown_fields() {
+    // `deny_unknown_fields` removed: forward-compatible with new server fields.
+    let json = serde_json::json!({
+        "observe_me": true,
+        "future_field": 123
+    });
+    let cfg: SessionPeerConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(cfg.observe_me, Some(true));
+    assert_eq!(cfg.observe_others, None);
 }
 
 #[test]

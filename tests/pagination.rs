@@ -940,3 +940,43 @@ async fn page_map_transforms_items() {
     assert_eq!(mapped.page(), 1);
     assert_eq!(mapped.raw_items().len(), 2);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// PR5 — page-number overflow at u64::MAX must not panic (debug overflow checks)
+//
+// `has_next()` is defined as `page < pages`, so it can never be `true` when
+// `page == u64::MAX`. The reachable hazard was the unconditional `page + 1`
+// computed in `into_stream` (plus the defensive guard in `next_page`): both
+// must now treat overflow as "no more pages" instead of panicking/wrapping.
+// ═══════════════════════════════════════════════════════════════════════
+#[tokio::test]
+async fn page_max_page_number_does_not_overflow() {
+    use futures_util::TryStreamExt;
+
+    let page_resp = PageResponse::<Peer>::new(
+        vec![serde_json::from_value(peer_json("alice")).unwrap()],
+        1,
+        u64::MAX,
+        2,
+        u64::MAX,
+    );
+
+    // Attach a fetcher that errors if ever invoked: at the u64::MAX boundary no
+    // further page should be requested.
+    let page: Page<Peer> = Page::from_page_response(page_resp).with_fetcher(|_page_num: u64| {
+        Box::pin(async move {
+            Err::<PageResponse<Peer>, HonchoError>(HonchoError::Validation(
+                "fetcher must not be called past u64::MAX".into(),
+            ))
+        })
+    });
+
+    // `next_page()` must not panic and must report "no more pages".
+    assert!(page.next_page().await.unwrap().is_none());
+
+    // `into_stream()` must terminate without panicking and yield only the
+    // current page's items (the fetcher is never invoked).
+    let collected: Vec<Peer> = page.into_stream().try_collect().await.unwrap();
+    assert_eq!(collected.len(), 1);
+    assert_eq!(collected[0].id, "alice");
+}

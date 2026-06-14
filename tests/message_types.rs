@@ -117,14 +117,6 @@ fn message_configuration_with_reasoning() {
 }
 
 #[test]
-fn message_search_options_default_limit() {
-    let val = load_fixture("MessageSearchOptions", "min");
-    let opts: MessageSearchOptions = serde_json::from_value(val).unwrap();
-    assert_eq!(opts.limit, 10);
-    assert_eq!(opts.query, "test");
-}
-
-#[test]
 fn message_page_empty() {
     let val = load_fixture("Page_Message", "min");
     let page: MessagePage = serde_json::from_value(val).unwrap();

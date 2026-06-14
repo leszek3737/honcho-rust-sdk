@@ -6,7 +6,7 @@ use common::{load_fixture, roundtrip, validate_openapi};
 use honcho_ai::types::workspace::{
     DreamConfiguration, PeerCardConfiguration, ReasoningConfiguration, SummaryConfiguration,
     Workspace, WorkspaceConfiguration, WorkspaceCreate, WorkspaceGet, WorkspacePage,
-    WorkspaceUpdate,
+    WorkspaceSearchRequest, WorkspaceUpdate,
 };
 
 macro_rules! schema_test {
@@ -63,6 +63,20 @@ schema_test!(
 );
 schema_test!(summary_config, "SummaryConfiguration", SummaryConfiguration);
 schema_test!(dream_config, "DreamConfiguration", DreamConfiguration);
+
+// WorkspaceSearchRequest is an inline request body with no named OpenAPI schema,
+// so only the serde roundtrip is asserted (no OpenAPI validation).
+#[test]
+fn workspace_search_request_min_roundtrip() {
+    let fixture = load_fixture("WorkspaceSearchRequest", "min");
+    roundtrip::<WorkspaceSearchRequest>(fixture);
+}
+
+#[test]
+fn workspace_search_request_max_roundtrip() {
+    let fixture = load_fixture("WorkspaceSearchRequest", "max");
+    roundtrip::<WorkspaceSearchRequest>(fixture);
+}
 
 #[test]
 fn workspace_builder_minimal() {

@@ -11,7 +11,7 @@ pub use super::common::ReasoningConfiguration;
 ///
 /// Represents a single message created by a peer within a session.
 /// Use the top-level [`crate::Message`] wrapper for the enriched type.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MessageResponse {
     /// Unique message identifier.
@@ -30,15 +30,16 @@ pub struct MessageResponse {
     /// ID of the workspace this message belongs to.
     pub workspace_id: String,
     /// Token count for the message content.
+    #[serde(default)]
     pub token_count: u64,
 }
 
 /// Parameters for creating a single message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
 pub struct MessageCreate {
-    /// Message content text (max 25 000 characters).
+    /// Message content text (max 25 000 characters, server-validated).
     pub content: String,
     /// ID of the peer authoring the message.
     pub peer_id: String,
@@ -54,7 +55,7 @@ pub struct MessageCreate {
 }
 
 /// Parameters for batch-creating messages (1–100).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MessageBatchCreate {
     /// List of messages to create.
@@ -62,7 +63,7 @@ pub struct MessageBatchCreate {
 }
 
 /// Parameters for updating a message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, bon::Builder)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
 pub struct MessageUpdate {
@@ -73,7 +74,7 @@ pub struct MessageUpdate {
 
 /// Request body for setting message metadata.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MessageMetadataSet {
     /// Metadata to set.
     pub metadata: HashMap<String, serde_json::Value>,
@@ -82,15 +83,16 @@ pub struct MessageMetadataSet {
 /// Configuration that can be attached to a message.
 ///
 /// All fields optional; message-level config overrides session and workspace config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct MessageConfiguration {
     /// Reasoning configuration for this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfiguration>,
 }
 
 /// Parameters for searching messages.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
 pub struct MessageSearchOptions {
@@ -99,7 +101,7 @@ pub struct MessageSearchOptions {
     /// Optional filters to scope the search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<HashMap<String, serde_json::Value>>,
-    /// Maximum number of results (1–100, default 10).
+    /// Maximum number of results (1–100, default 10, server-validated).
     #[serde(default = "default_limit")]
     #[builder(default = default_limit())]
     pub limit: u32,
@@ -132,5 +134,20 @@ mod tests {
     fn message_search_options_default_limit() {
         let opts: MessageSearchOptions = serde_json::from_str(r#"{"query":"hello"}"#).unwrap();
         assert_eq!(opts.limit, 10);
+    }
+
+    #[test]
+    fn message_response_token_count_defaults_to_zero_when_missing() {
+        // Older servers may omit token_count; serde(default) must yield 0.
+        let json = r#"{
+            "id": "msg_01",
+            "content": "hello",
+            "peer_id": "peer_01",
+            "session_id": "sess_01",
+            "workspace_id": "ws_01",
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let msg: MessageResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.token_count, 0);
     }
 }
