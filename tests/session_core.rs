@@ -57,7 +57,10 @@ fn session_body(metadata: Value, configuration: Value) -> Value {
 
 /// The session body returned by [`setup`] at construction time.
 fn session_seed() -> Value {
-    session_body(json!({"topic": "test"}), json!({"reasoning": {"enabled": true}}))
+    session_body(
+        json!({"topic": "test"}),
+        json!({"reasoning": {"enabled": true}}),
+    )
 }
 
 fn peer_config(observe_me: Option<bool>, observe_others: Option<bool>) -> SessionPeerConfig {
@@ -211,7 +214,8 @@ async fn session_set_metadata_replaces_via_put() {
         .and(path(SESSION_PATH))
         .and(body_json(json!({"metadata": {"updated": true}})))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(session_body(json!({"updated": true}), json!({}))),
+            ResponseTemplate::new(200)
+                .set_body_json(session_body(json!({"updated": true}), json!({}))),
         )
         .expect(1)
         .mount(&server)
@@ -233,11 +237,16 @@ async fn session_set_configuration_puts_to_session_endpoint() {
     let new_config: SessionConfiguration =
         serde_json::from_value(json!({"summary": {"enabled": false}})).unwrap();
 
-    let resp = session_body(json!({"topic": "test"}), json!({"summary": {"enabled": false}}));
+    let resp = session_body(
+        json!({"topic": "test"}),
+        json!({"summary": {"enabled": false}}),
+    );
 
     Mock::given(method("PUT"))
         .and(path(SESSION_PATH))
-        .and(body_json(json!({"configuration": {"summary": {"enabled": false}}})))
+        .and(body_json(
+            json!({"configuration": {"summary": {"enabled": false}}}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(&resp))
         .expect(1)
         .mount(&server)
@@ -260,7 +269,9 @@ async fn session_refresh_propagates_not_found() {
 
     Mock::given(method("GET"))
         .and(path(SESSION_PATH))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"detail": "session not found"})))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"detail": "session not found"})),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -489,9 +500,7 @@ async fn session_peers_empty_returns_empty_vec() {
     Mock::given(method("GET"))
         .and(path(PEERS_PATH))
         .and(query_param("page", "1"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(page_json(Vec::new(), 0, 1, 50, 1)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(page_json(Vec::new(), 0, 1, 50, 1)))
         .expect(1)
         .mount(&server)
         .await;

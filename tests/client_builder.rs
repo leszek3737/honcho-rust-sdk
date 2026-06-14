@@ -65,7 +65,10 @@ fn rejects_invalid_workspace_ids() {
                 .workspace_id(workspace_id)
                 .build(),
         );
-        assert!(result.is_err(), "workspace_id {workspace_id:?} should be rejected");
+        assert!(
+            result.is_err(),
+            "workspace_id {workspace_id:?} should be rejected"
+        );
         let err = result.err().expect("checked is_err above");
         assert!(
             matches!(err, HonchoError::Configuration(_)),
@@ -96,7 +99,9 @@ fn rejects_too_long_workspace_id() {
             .workspace_id("a".repeat(513))
             .build(),
     );
-    let err = result.err().expect("513-char workspace_id must be rejected");
+    let err = result
+        .err()
+        .expect("513-char workspace_id must be rejected");
     assert!(
         matches!(err, HonchoError::Configuration(_)),
         "expected Configuration, got {err:?}"
@@ -145,7 +150,10 @@ fn normalizes_preserves_query_string() {
             .base_url("http://localhost:8000/api/?foo=bar")
             .build(),
     );
-    assert_eq!(client.base_url().as_str(), "http://localhost:8000/api?foo=bar");
+    assert_eq!(
+        client.base_url().as_str(),
+        "http://localhost:8000/api?foo=bar"
+    );
 }
 
 #[test]
@@ -163,10 +171,9 @@ fn normalizes_preserves_fragment() {
 #[test]
 #[serial_test::serial]
 fn workspace_id_defaults_when_unset() {
-    let client = temp_env::with_vars(
-        [("HONCHO_WORKSPACE_ID", None::<&str>)],
-        || build_ok(Honcho::builder().base_url("http://localhost:8000").build()),
-    );
+    let client = temp_env::with_vars([("HONCHO_WORKSPACE_ID", None::<&str>)], || {
+        build_ok(Honcho::builder().base_url("http://localhost:8000").build())
+    });
     assert_eq!(client.workspace_id(), "default");
     assert_eq!(client.base_url().as_str(), "http://localhost:8000/");
 }
@@ -326,7 +333,10 @@ async fn builder_without_api_key_sends_no_auth_header() {
     // Pin the auth/workspace env off so neither the ambient shell nor a
     // concurrent test can inject a Bearer token or a non-default workspace.
     let client = temp_env::with_vars(
-        [("HONCHO_API_KEY", None::<&str>), ("HONCHO_WORKSPACE_ID", None)],
+        [
+            ("HONCHO_API_KEY", None::<&str>),
+            ("HONCHO_WORKSPACE_ID", None),
+        ],
         || build_ok(Honcho::builder().base_url(uri.clone()).build()),
     );
 

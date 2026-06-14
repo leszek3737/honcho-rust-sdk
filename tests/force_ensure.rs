@@ -54,7 +54,9 @@ async fn ensure_workspace_single_flight_collapses_concurrent_calls() {
     let config_path = format!("/v3/workspaces/{TEST_WORKSPACE_ID}");
     Mock::given(method("GET"))
         .and(path(config_path))
-        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_response(TEST_WORKSPACE_ID)))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_response(TEST_WORKSPACE_ID)),
+        )
         .mount(&server)
         .await;
 
@@ -170,7 +172,9 @@ async fn force_ensure_conflict_409_is_ok() {
     Mock::given(method("POST"))
         .and(path("/v3/workspaces"))
         .and(body_json(json!({ "id": TEST_WORKSPACE_ID })))
-        .respond_with(ResponseTemplate::new(409).set_body_json(json!({ "detail": "workspace exists" })))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({ "detail": "workspace exists" })),
+        )
         .expect(2)
         .mount(&server)
         .await;

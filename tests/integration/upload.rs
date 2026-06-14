@@ -6,7 +6,7 @@ use honcho_ai::error::Result;
 use honcho_ai::{FileSource, HonchoError, Message, Session, UploadFileBuilder};
 use serde_json::json;
 
-use crate::common::{try_client, WorkspaceGuard};
+use crate::common::{WorkspaceGuard, try_client};
 
 /// Hard ceiling for a single upload round-trip. Streaming has its own 30s budget
 /// elsewhere; mirror it here so a stuck upload fails the test instead of hanging
@@ -146,7 +146,11 @@ async fn upload_path_file_to_session() {
     )
     .await;
 
-    assert_eq!(messages.len(), 1, "small plaintext file must yield one message");
+    assert_eq!(
+        messages.len(),
+        1,
+        "small plaintext file must yield one message"
+    );
     assert_text_upload(&messages, expected, "upload-path-peer");
 }
 
@@ -183,7 +187,10 @@ async fn upload_large_file_to_session() {
         "chunk content must be pure payload bytes, no corruption"
     );
     let total: usize = messages.iter().map(|m| m.content().len()).sum();
-    assert_eq!(total, SIZE, "reassembled payload length must match the source");
+    assert_eq!(
+        total, SIZE,
+        "reassembled payload length must match the source"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -283,7 +290,12 @@ async fn upload_for_peer_outside_session() {
     // `insider` belongs to the session; `outsider` exists in the workspace but is
     // never added to it.
     guard.client().peer("upload-insider").build().await.unwrap();
-    guard.client().peer("upload-outsider").build().await.unwrap();
+    guard
+        .client()
+        .peer("upload-outsider")
+        .build()
+        .await
+        .unwrap();
     let session = guard
         .client()
         .session("upload-outsider-session")
@@ -334,7 +346,11 @@ async fn upload_empty_file() {
 
     let result = send_under_timeout(
         session
-            .upload_file(FileSource::bytes("empty.txt", Vec::<u8>::new(), "text/plain"))
+            .upload_file(FileSource::bytes(
+                "empty.txt",
+                Vec::<u8>::new(),
+                "text/plain",
+            ))
             .peer("upload-empty-peer"),
         "upload_empty",
     )

@@ -352,7 +352,9 @@ async fn workspace_ensure_conflict_is_ok() {
     Mock::given(method("POST"))
         .and(path("/v3/workspaces"))
         .and(body_json(json!({ "id": "ws1" })))
-        .respond_with(ResponseTemplate::new(409).set_body_json(json!({ "detail": "already exists" })))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({ "detail": "already exists" })),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -442,7 +444,12 @@ fn env_honcho_url_beats_api_url() {
     // HONCHO_API_URL. If precedence were reversed, the request would hit a dead
     // port and `force_ensure` would error.
     run_env_ensure(
-        |uri| honcho_env(&[("HONCHO_URL", uri), ("HONCHO_API_URL", "http://127.0.0.1:9")]),
+        |uri| {
+            honcho_env(&[
+                ("HONCHO_URL", uri),
+                ("HONCHO_API_URL", "http://127.0.0.1:9"),
+            ])
+        },
         |_uri| Honcho::from_params(Honcho::builder().workspace_id("ws1").build()),
     );
 }

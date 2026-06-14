@@ -153,9 +153,13 @@ async fn peers_handles_empty_page() {
         .and(path("/v3/workspaces/ws1/peers/list"))
         .and(query_param("page", "1"))
         .and(query_param("size", "50"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(common::page_json(vec![], 0, 1, 50, 0)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(common::page_json(
+            vec![],
+            0,
+            1,
+            50,
+            0,
+        )))
         .expect(1)
         .mount(&server)
         .await;

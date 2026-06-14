@@ -68,7 +68,9 @@ async fn get_metadata_empty_when_no_metadata() {
 
     Mock::given(method("GET"))
         .and(path(ws_path()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), json!({}))))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), json!({}))),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -92,10 +94,7 @@ async fn get_metadata_surfaces_decode_error_on_malformed_json() {
         .mount(&server)
         .await;
 
-    let err = make_honcho(&server.uri())
-        .get_metadata()
-        .await
-        .unwrap_err();
+    let err = make_honcho(&server.uri()).get_metadata().await.unwrap_err();
 
     assert!(
         matches!(err, HonchoError::Decode { .. }),
@@ -210,7 +209,9 @@ async fn get_configuration_empty_when_no_configuration() {
 
     Mock::given(method("GET"))
         .and(path(ws_path()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), json!({}))))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workspace_body(json!({}), json!({}))),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -261,7 +262,10 @@ async fn gets_workspace_configuration_raw_by_get() {
     let server = MockServer::start().await;
     mount_workspace_ensure(&server, 1).await;
 
-    let body = workspace_body(json!({}), json!({"unknown_future_field": {"enabled": true}}));
+    let body = workspace_body(
+        json!({}),
+        json!({"unknown_future_field": {"enabled": true}}),
+    );
     Mock::given(method("GET"))
         .and(path(ws_path()))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))

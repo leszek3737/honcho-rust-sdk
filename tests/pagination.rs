@@ -93,12 +93,19 @@ async fn page_first_page_exposes_items_and_metadata() {
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["alice", "bob"], 5, 1, 2, 3)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["alice", "bob"],
+            5,
+            1,
+            2,
+            3,
+        )))
         .expect(1)
         .mount(&server)
         .await;
 
-    let page: Page<Peer> = Page::from_page_response(fetch_page_one(&server.uri(), 2, &json!({})).await);
+    let page: Page<Peer> =
+        Page::from_page_response(fetch_page_one(&server.uri(), 2, &json!({})).await);
 
     assert_eq!(page.items().len(), 2);
     // `raw_items()` borrows the same data without allocating a new Vec.
@@ -121,14 +128,26 @@ async fn page_next_page_returns_page_2() {
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["alice", "bob"], 5, 1, 2, 3)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["alice", "bob"],
+            5,
+            1,
+            2,
+            3,
+        )))
         .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["carol", "dave"], 5, 2, 2, 3)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["carol", "dave"],
+            5,
+            2,
+            2,
+            3,
+        )))
         .expect(1)
         .mount(&server)
         .await;
@@ -166,7 +185,8 @@ async fn page_next_page_returns_none_when_no_more() {
         .mount(&server)
         .await;
 
-    let page: Page<Peer> = Page::from_page_response(fetch_page_one(&server.uri(), 2, &json!({})).await);
+    let page: Page<Peer> =
+        Page::from_page_response(fetch_page_one(&server.uri(), 2, &json!({})).await);
 
     assert_eq!(page.items().len(), 1);
     assert!(!page.has_next());
@@ -199,7 +219,12 @@ async fn page_propagates_filters_on_subsequent_pages() {
         .await;
 
     let page1_resp = fetch_page_one(&server.uri(), 1, &filter_body).await;
-    let page1 = page1_resp.with_fetcher(peer_fetcher(&server.uri(), PEERS_LIST, 1, filter_body.clone()));
+    let page1 = page1_resp.with_fetcher(peer_fetcher(
+        &server.uri(),
+        PEERS_LIST,
+        1,
+        filter_body.clone(),
+    ));
 
     let page2 = page1
         .next_page()
@@ -290,14 +315,26 @@ async fn page_into_stream_yields_all_items_across_pages() {
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["carol", "dave"], 6, 2, 2, 3)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["carol", "dave"],
+            6,
+            2,
+            2,
+            3,
+        )))
         .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "3"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["eve", "frank"], 6, 3, 2, 3)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["eve", "frank"],
+            6,
+            3,
+            2,
+            3,
+        )))
         .expect(1)
         .mount(&server)
         .await;
@@ -346,7 +383,10 @@ async fn page_into_stream_propagates_error_on_2nd_page() {
     // Page 2 → HTTP 500 → mapped to Server { status: 500 }.
     let third = stream.next().await.expect("error slot");
     let is_server_500 = matches!(third, Err(HonchoError::Server { status: 500, .. }));
-    assert!(is_server_500, "expected Server {{ status: 500 }}, got {third:?}");
+    assert!(
+        is_server_500,
+        "expected Server {{ status: 500 }}, got {third:?}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -361,7 +401,13 @@ async fn page_into_stream_drop_in_middle_does_not_fetch_next() {
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["carol", "dave"], 4, 2, 2, 2)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["carol", "dave"],
+            4,
+            2,
+            2,
+            2,
+        )))
         .expect(0)
         .mount(&server)
         .await;
@@ -466,7 +512,13 @@ async fn page_transform_propagates_to_refetched_pages() {
     Mock::given(method("POST"))
         .and(path(PEERS_LIST))
         .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(&["carol", "dave"], 4, 2, 2, 2)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_page(
+            &["carol", "dave"],
+            4,
+            2,
+            2,
+            2,
+        )))
         .expect(1)
         .mount(&server)
         .await;
@@ -500,8 +552,12 @@ async fn page_with_fetcher_no_clone_path_enables_next_page() {
 
     // `Page::new` yields a sole-owner Arc, so `with_fetcher` takes the no-clone
     // (`Arc::try_unwrap` Ok) branch.
-    let page1: Page<Peer> = Page::new(vec![peer("alice")], 2, 1, 1, 2)
-        .with_fetcher(peer_fetcher(&server.uri(), PEERS_LIST, 1, json!({})));
+    let page1: Page<Peer> = Page::new(vec![peer("alice")], 2, 1, 1, 2).with_fetcher(peer_fetcher(
+        &server.uri(),
+        PEERS_LIST,
+        1,
+        json!({}),
+    ));
 
     assert!(page1.has_next());
     let page2 = page1.next_page().await.unwrap().expect("page 2");

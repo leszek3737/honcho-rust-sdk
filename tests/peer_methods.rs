@@ -118,8 +118,14 @@ async fn peer_representation_rejects_out_of_range_params() {
     let cases = [
         (BadSearchParam::SearchTopK(0), "search_top_k"),
         (BadSearchParam::SearchTopK(101), "search_top_k"),
-        (BadSearchParam::SearchMaxDistance(1.5), "search_max_distance"),
-        (BadSearchParam::SearchMaxDistance(-0.1), "search_max_distance"),
+        (
+            BadSearchParam::SearchMaxDistance(1.5),
+            "search_max_distance",
+        ),
+        (
+            BadSearchParam::SearchMaxDistance(-0.1),
+            "search_max_distance",
+        ),
         (BadSearchParam::MaxConclusions(0), "max_conclusions"),
         (BadSearchParam::MaxConclusions(101), "max_conclusions"),
     ];

@@ -307,9 +307,7 @@ async fn peer_create_http_error_surfaces() {
     // 422 is not retryable, so the peer POST is hit exactly once.
     Mock::given(method("POST"))
         .and(path(PEERS_PATH))
-        .respond_with(
-            ResponseTemplate::new(422).set_body_json(json!({ "detail": "invalid peer" })),
-        )
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({ "detail": "invalid peer" })))
         .expect(1)
         .mount(&server)
         .await;

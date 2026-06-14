@@ -174,8 +174,14 @@ async fn add_messages_preserves_duplicate_content_and_order() {
         .await;
 
     let msgs = vec![
-        MessageCreate::builder().content("dup").peer_id(PEER).build(),
-        MessageCreate::builder().content("dup").peer_id(PEER).build(),
+        MessageCreate::builder()
+            .content("dup")
+            .peer_id(PEER)
+            .build(),
+        MessageCreate::builder()
+            .content("dup")
+            .peer_id(PEER)
+            .build(),
         MessageCreate::builder()
             .content("other")
             .peer_id(PEER)
@@ -224,9 +230,7 @@ async fn add_messages_chunks_at_hundred() {
             Mock::given(method("POST"))
                 .and(path(MESSAGES_PATH))
                 .and(body_json(expected_batch_body(100..total)))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(response_chunk(100..total)),
-                )
+                .respond_with(ResponseTemplate::new(200).set_body_json(response_chunk(100..total)))
                 .expect(1)
                 .mount(&server)
                 .await;

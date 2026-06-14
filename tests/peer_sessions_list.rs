@@ -15,7 +15,9 @@ use common::{make_honcho, mount_workspace_ensure, page_json, peer_response, sess
 use honcho_ai::error::HonchoError;
 use honcho_ai::types::pagination::Page;
 use honcho_ai::types::session::{SessionListOptions, SessionResponse};
-use wiremock::matchers::{body_bytes, body_json, method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{
+    body_bytes, body_json, method, path, query_param, query_param_is_missing,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Sessions-list route every test below targets.
@@ -85,7 +87,9 @@ async fn peer_sessions_with_options_sends_filters_and_pagination() {
 
     Mock::given(method("POST"))
         .and(path(SESSIONS_PATH))
-        .and(body_json(serde_json::json!({ "filters": { "is_active": true } })))
+        .and(body_json(
+            serde_json::json!({ "filters": { "is_active": true } }),
+        ))
         .and(query_param("page", "2"))
         .and(query_param("size", "10"))
         .and(query_param("reverse", "true"))

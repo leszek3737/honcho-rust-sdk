@@ -70,7 +70,11 @@ async fn full_lifecycle() {
 
     // Listing returns exactly the two messages, attributed to their authors.
     let listed = session.messages().await.unwrap().items();
-    assert_eq!(listed.len(), 2, "expected exactly the two messages just added");
+    assert_eq!(
+        listed.len(),
+        2,
+        "expected exactly the two messages just added"
+    );
     let author_ids: HashSet<&str> = listed.iter().map(honcho_ai::Message::peer_id).collect();
     assert_eq!(
         author_ids,
@@ -117,8 +121,18 @@ async fn full_lifecycle() {
 
     // Zero-alloc membership checks over the raw page slices.
     let peers_page = client.peers().await.unwrap();
-    assert!(peers_page.items_ref().iter().any(|p| p.id == "lifecycle-alice"));
-    assert!(peers_page.items_ref().iter().any(|p| p.id == "lifecycle-bob"));
+    assert!(
+        peers_page
+            .items_ref()
+            .iter()
+            .any(|p| p.id == "lifecycle-alice")
+    );
+    assert!(
+        peers_page
+            .items_ref()
+            .iter()
+            .any(|p| p.id == "lifecycle-bob")
+    );
 
     let sessions_page = client.sessions().await.unwrap();
     assert!(
@@ -433,7 +447,9 @@ async fn conclusion_query_with_distance_filter() {
             "distance filter returned more results than the unfiltered query"
         ),
         Err(HonchoError::Server { status, message }) => {
-            eprintln!("skipping unfiltered superset assert: server returned HTTP {status} {message}");
+            eprintln!(
+                "skipping unfiltered superset assert: server returned HTTP {status} {message}"
+            );
         }
         Err(e) => panic!("unfiltered conclusion query failed: {e}"),
     }
