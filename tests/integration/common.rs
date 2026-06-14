@@ -104,7 +104,18 @@ pub struct WorkspaceGuard {
 
 impl WorkspaceGuard {
     /// Wraps `client`, capturing its workspace id for cleanup on drop.
+    ///
+    /// Panics with an actionable message if called outside a multi-thread
+    /// runtime: the `Drop` teardown uses `block_in_place`, which would
+    /// otherwise panic *during unwinding* and abort the process, swallowing
+    /// the test's real failure. Checking here surfaces a forgotten
+    /// `flavor = "multi_thread"` annotation in the test body instead.
     pub fn new(client: Honcho) -> Self {
+        assert_eq!(
+            Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread,
+            "WorkspaceGuard requires #[tokio::test(flavor = \"multi_thread\")]"
+        );
         let workspace_id = client.workspace_id().to_string();
         Self {
             client,

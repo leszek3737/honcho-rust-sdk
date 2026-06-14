@@ -9,13 +9,14 @@
 
 use std::collections::HashMap;
 
-use honcho_ai::Honcho;
 use honcho_ai::error::HonchoError;
 use honcho_ai::session::Session;
 use honcho_ai::types::session::SessionContextOptions;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+mod common;
 
 fn workspace_response_json() -> Value {
     json!({
@@ -62,7 +63,7 @@ async fn mount_session_setup(server: &MockServer) {
 /// Builds a `Session` against `server` using the default retry policy.
 async fn make_session(server: &MockServer) -> Session {
     mount_session_setup(server).await;
-    let honcho = Honcho::new(&server.uri(), "ws1").unwrap();
+    let honcho = common::make_honcho(&server.uri());
     honcho.session("sess1").build().await.unwrap()
 }
 
@@ -73,14 +74,7 @@ async fn make_session(server: &MockServer) -> Session {
 /// those tests to exactly one request and lets the mock assert `.expect(1)`.
 async fn make_session_no_retry(server: &MockServer) -> Session {
     mount_session_setup(server).await;
-    let honcho = Honcho::from_params(
-        Honcho::builder()
-            .base_url(server.uri())
-            .workspace_id("ws1")
-            .max_retries(0)
-            .build(),
-    )
-    .unwrap();
+    let honcho = common::make_honcho_no_retry(&server.uri());
     honcho.session("sess1").build().await.unwrap()
 }
 

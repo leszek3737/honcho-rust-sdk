@@ -231,7 +231,7 @@ async fn peers_with_filters_rejects_size_above_max() {
 }
 
 #[tokio::test]
-async fn peers_maps_404_to_client_error() {
+async fn peers_maps_404_to_not_found_error() {
     let server = MockServer::start().await;
     let honcho = common::make_honcho(&server.uri());
     common::mount_workspace_ensure(&server, 1).await;

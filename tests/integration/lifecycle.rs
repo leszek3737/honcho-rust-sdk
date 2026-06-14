@@ -145,11 +145,17 @@ async fn full_lifecycle() {
     let fetched = session.get_message(created[0].id()).await.unwrap();
     assert_eq!(fetched.id(), created[0].id());
 
-    // Error path: fetching a well-formed but unknown id must surface an error.
-    let missing = session
+    // Error path: a well-formed but unknown id must surface NotFound (404),
+    // not just "some error" — assert the variant + status per the suite contract.
+    let missing_err = session
         .get_message("00000000-0000-0000-0000-000000000000")
-        .await;
-    assert!(missing.is_err(), "get_message on an unknown id must fail");
+        .await
+        .expect_err("get_message on an unknown id must fail");
+    assert_eq!(missing_err.status_code(), Some(404));
+    assert!(
+        matches!(missing_err, HonchoError::NotFound { .. }),
+        "unknown message id must surface NotFound, got {missing_err:?}"
+    );
 
     let mut update_meta = HashMap::new();
     update_meta.insert("edited".to_owned(), json!(true));
