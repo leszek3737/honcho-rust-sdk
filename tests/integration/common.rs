@@ -90,12 +90,14 @@ pub async fn try_client() -> Option<Honcho> {
 /// # Runtime requirement
 ///
 /// Every test constructing a `WorkspaceGuard` MUST be annotated
-/// `#[tokio::test(flavor = "multi_thread")]`. The `Drop` impl awaits the
+/// `#[tokio::test(flavor = "multi_thread")]`. The `Drop` teardown awaits the
 /// asynchronous `delete_workspace` via [`tokio::task::block_in_place`] +
-/// [`Handle::block_on`], which **panics on a current-thread runtime** (the
-/// `#[tokio::test]` default). The previous fire-and-forget `Handle::spawn`
-/// approach silently leaked workspaces because the spawned task was never
-/// polled to completion before the runtime shut down.
+/// [`Handle::block_on`], which requires a multi-thread runtime; `new` asserts
+/// this up front so a forgotten annotation fails loudly in the test body
+/// instead of mid-`Drop`. `Drop` itself never panics — with no runtime it logs
+/// a loud LEAK warning rather than aborting the process. The previous
+/// fire-and-forget `Handle::spawn` approach silently leaked workspaces because
+/// the spawned task was never polled to completion before the runtime shut down.
 pub struct WorkspaceGuard {
     client: Honcho,
     workspace_id: String,
@@ -144,13 +146,21 @@ impl Drop for WorkspaceGuard {
         }
         let client = &self.client;
         let ws_id = &self.workspace_id;
-        // Block on the async deletion synchronously. Requires a multi-thread
-        // runtime: `block_in_place` panics on a current-thread runtime.
-        tokio::task::block_in_place(|| {
-            match Handle::current().block_on(client.delete_workspace(ws_id)) {
-                Ok(()) => eprintln!("  cleaned up workspace {ws_id}"),
-                Err(e) => eprintln!("  warning: failed to delete workspace {ws_id}: {e}"),
-            }
+        // Never panic in Drop: a panic during unwinding aborts the process and
+        // swallows the test's real failure. The multi-thread requirement is
+        // enforced loudly at construction (see `new`). Here we degrade
+        // gracefully but LOUDLY — a missing runtime means the workspace leaked,
+        // which must stay visible, never a silent skip.
+        let Ok(handle) = Handle::try_current() else {
+            eprintln!(
+                "  WARNING: no Tokio runtime in WorkspaceGuard::drop; workspace {ws_id} LEAKED"
+            );
+            return;
+        };
+        // `block_in_place` requires the multi-thread runtime asserted in `new`.
+        tokio::task::block_in_place(|| match handle.block_on(client.delete_workspace(ws_id)) {
+            Ok(()) => eprintln!("  cleaned up workspace {ws_id}"),
+            Err(e) => eprintln!("  warning: failed to delete workspace {ws_id}: {e}"),
         });
     }
 }

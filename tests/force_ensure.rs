@@ -155,8 +155,14 @@ async fn force_ensure_retries_after_uncached_error() {
 
     let honcho = make_honcho(&server.uri());
 
-    let first = honcho.force_ensure().await;
-    assert!(first.is_err(), "first ensure should surface the 500");
+    let err = honcho
+        .force_ensure()
+        .await
+        .expect_err("first ensure should surface the 500");
+    assert!(
+        matches!(err, HonchoError::Server { status: 500, .. }),
+        "first ensure should surface the 500, got {err:?}"
+    );
     honcho.force_ensure().await.unwrap();
 
     server.verify().await;
