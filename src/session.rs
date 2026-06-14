@@ -1672,7 +1672,7 @@ async fn fetch_session_context(
     options.validate()?;
     let route = routes::session_context(workspace_id, session_id)?;
     let params = options.to_query_params();
-    let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, &**v)).collect();
     http.get(&route, &refs).await
 }
 

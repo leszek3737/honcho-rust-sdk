@@ -1,5 +1,11 @@
 //! Generic pagination types.
 
+// `Page<TRaw, TRaw>` deliberately repeats the same type for both parameters in
+// the default `TOut = TRaw` impls below. Clippy's `mismatching_type_param_order`
+// flags this even though the ordering is correct and intentional, so we allow it
+// module-wide rather than annotating each individual impl.
+#![allow(clippy::mismatching_type_param_order)]
+
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -14,6 +20,12 @@ use crate::http::client::HttpClient;
 type PageFetcher<TRaw> = Arc<
     dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<PageResponse<TRaw>>> + Send>> + Send + Sync,
 >;
+
+/// Maximum page size accepted by [`validate_pagination`] (inclusive).
+const MAX_PAGE_SIZE: u64 = 100;
+
+/// Query-parameter value requesting reverse ordering.
+const REVERSE_TRUE: &str = "true";
 
 /// Serde-friendly raw page response from the API.
 ///
@@ -62,7 +74,6 @@ impl<T> Default for PageResponse<T> {
     }
 }
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<T: 'static> PageResponse<T> {
     /// Convert this response into a [`Page`] with an attached fetcher,
     /// without cloning the items vector.
@@ -181,7 +192,10 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
             Some(f) => Arc::clone(f),
             None => return Ok(None),
         };
-        let next_num = self.inner.page + 1;
+        // Treat page-number overflow as "no more pages" rather than panicking.
+        let Some(next_num) = self.inner.page.checked_add(1) else {
+            return Ok(None);
+        };
         let transform = Arc::clone(&self.inner.transform);
         let next_fetcher = self.inner.next_fetcher.clone();
 
@@ -211,22 +225,46 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
         Fut: Future<Output = Result<PageResponse<TRaw>>> + Send + 'static,
         TRaw: Clone,
     {
+        let next_fetcher: PageFetcher<TRaw> = Arc::new(move |pn| Box::pin(fetcher(pn)));
+        // Move the items/transform out of the inner when we hold the only
+        // reference (the common case); otherwise fall back to cloning.
+        let inner = match Arc::try_unwrap(self.inner) {
+            Ok(inner) => PageInner {
+                items: inner.items,
+                total: inner.total,
+                page: inner.page,
+                size: inner.size,
+                pages: inner.pages,
+                next_fetcher: Some(next_fetcher),
+                transform: inner.transform,
+            },
+            Err(arc) => PageInner {
+                items: arc.items.clone(),
+                total: arc.total,
+                page: arc.page,
+                size: arc.size,
+                pages: arc.pages,
+                next_fetcher: Some(next_fetcher),
+                transform: Arc::clone(&arc.transform),
+            },
+        };
         Self {
-            inner: Arc::new(PageInner {
-                items: self.inner.items.clone(),
-                total: self.inner.total,
-                page: self.inner.page,
-                size: self.inner.size,
-                pages: self.inner.pages,
-                next_fetcher: Some(Arc::new(move |pn| Box::pin(fetcher(pn)))),
-                transform: self.inner.transform.clone(),
-            }),
+            inner: Arc::new(inner),
         }
     }
 
     /// Apply a secondary transform, producing a `Page<TRaw, TNewOut>`.
     ///
     /// The new transform composes `f` after the existing one.
+    ///
+    /// # Warning
+    ///
+    /// The transform only affects the *output* of [`items`](Self::items) and
+    /// [`into_stream`](Self::into_stream). The [`PartialEq`] and
+    /// [`serde::Serialize`] impls (available when `TOut = TRaw`) compare and
+    /// emit the **raw** items, ignoring the transform. Two pages that compare
+    /// equal can therefore still yield different `items()` after a non-identity
+    /// `map`.
     pub fn map<TNewOut>(
         self,
         f: impl Fn(TOut) -> TNewOut + Send + Sync + 'static,
@@ -234,17 +272,36 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
     where
         TRaw: Clone,
     {
-        let prev = self.inner.transform.clone();
+        // Move items/fetcher out of the inner when we hold the only reference
+        // (the common case); otherwise fall back to cloning.
+        let inner = match Arc::try_unwrap(self.inner) {
+            Ok(inner) => {
+                let prev = inner.transform;
+                PageInner {
+                    items: inner.items,
+                    total: inner.total,
+                    page: inner.page,
+                    size: inner.size,
+                    pages: inner.pages,
+                    next_fetcher: inner.next_fetcher,
+                    transform: Arc::new(move |raw| f(prev(raw))),
+                }
+            }
+            Err(arc) => {
+                let prev = Arc::clone(&arc.transform);
+                PageInner {
+                    items: arc.items.clone(),
+                    total: arc.total,
+                    page: arc.page,
+                    size: arc.size,
+                    pages: arc.pages,
+                    next_fetcher: arc.next_fetcher.clone(),
+                    transform: Arc::new(move |raw| f(prev(raw))),
+                }
+            }
+        };
         Page {
-            inner: Arc::new(PageInner {
-                items: self.inner.items.clone(),
-                total: self.inner.total,
-                page: self.inner.page,
-                size: self.inner.size,
-                pages: self.inner.pages,
-                next_fetcher: self.inner.next_fetcher.clone(),
-                transform: Arc::new(move |raw| f(prev(raw))),
-            }),
+            inner: Arc::new(inner),
         }
     }
 
@@ -259,11 +316,19 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
         TRaw: Clone + Send + 'static,
         TOut: Send + 'static,
     {
-        let items = self.inner.items.clone();
         let has_next = self.has_next();
-        let next_page_num = self.inner.page + 1;
-        let fetcher = self.inner.next_fetcher.clone();
-        let transform = self.inner.transform.clone();
+        // Page-number overflow means there cannot be a next page.
+        let next_page_num = self.inner.page.checked_add(1);
+        // Move items/fetcher/transform out of the inner when we hold the only
+        // reference (the common case); otherwise fall back to cloning.
+        let (items, fetcher, transform) = match Arc::try_unwrap(self.inner) {
+            Ok(inner) => (inner.items, inner.next_fetcher, inner.transform),
+            Err(arc) => (
+                arc.items.clone(),
+                arc.next_fetcher.clone(),
+                Arc::clone(&arc.transform),
+            ),
+        };
 
         async_stream::try_stream! {
             for item in items {
@@ -272,8 +337,9 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
 
             if let Some(fetcher) = fetcher
                 && has_next
+                && let Some(start) = next_page_num
             {
-                let mut current_page = next_page_num;
+                let mut current_page = start;
                 loop {
                     let resp = (fetcher)(current_page).await?;
                     let is_last = resp.page >= resp.pages;
@@ -283,7 +349,10 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
                     if is_last {
                         break;
                     }
-                    let next = resp.page + 1;
+                    // Overflow ⇒ treat as the last page instead of panicking.
+                    let Some(next) = resp.page.checked_add(1) else {
+                        break;
+                    };
                     if next <= current_page {
                         break;
                     }
@@ -294,7 +363,6 @@ impl<TRaw: 'static, TOut: 'static> Page<TRaw, TOut> {
     }
 }
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<TRaw: 'static> Page<TRaw, TRaw> {
     /// Create a new `Page` from raw data with no fetcher (identity transform).
     #[must_use]
@@ -343,7 +411,6 @@ impl<TRaw: 'static> Page<TRaw, TRaw> {
     }
 }
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<TRaw: 'static> Default for Page<TRaw, TRaw> {
     fn default() -> Self {
         Self {
@@ -380,7 +447,6 @@ impl<TRaw: fmt::Debug, TOut> fmt::Debug for Page<TRaw, TOut> {
     }
 }
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<TRaw: PartialEq> PartialEq for Page<TRaw, TRaw> {
     fn eq(&self, other: &Self) -> bool {
         self.inner.items == other.inner.items
@@ -391,10 +457,8 @@ impl<TRaw: PartialEq> PartialEq for Page<TRaw, TRaw> {
     }
 }
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<TRaw: Eq> Eq for Page<TRaw, TRaw> {}
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<TRaw: serde::Serialize> serde::Serialize for Page<TRaw, TRaw> {
     fn serialize<S: serde::Serializer>(
         &self,
@@ -411,7 +475,6 @@ impl<TRaw: serde::Serialize> serde::Serialize for Page<TRaw, TRaw> {
     }
 }
 
-#[allow(clippy::mismatching_type_param_order)]
 impl<'de, TRaw: serde::Deserialize<'de> + 'static> serde::Deserialize<'de> for Page<TRaw, TRaw> {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -419,6 +482,16 @@ impl<'de, TRaw: serde::Deserialize<'de> + 'static> serde::Deserialize<'de> for P
         let resp = PageResponse::<TRaw>::deserialize(deserializer)?;
         Ok(Self::from_page_response(resp))
     }
+}
+
+/// Build the `page` / `size` / `reverse` query parameters for a paginated POST
+/// request. The returned pairs borrow the caller-owned numeric strings.
+fn build_page_query<'a>(page: &'a str, size: &'a str, reverse: bool) -> Vec<(&'a str, &'a str)> {
+    let mut query = vec![("page", page), ("size", size)];
+    if reverse {
+        query.push(("reverse", REVERSE_TRUE));
+    }
+    query
 }
 
 /// Paginate a POST endpoint that accepts `page` / `size` / `reverse` query
@@ -443,35 +516,31 @@ where
 {
     validate_pagination(page, size)?;
 
-    let page_str = page.to_string();
+    // `size` and `reverse` are fixed for every page, so the size string is
+    // computed once and shared with the per-page fetcher below.
     let size_str = size.to_string();
-    let rev_str;
-    let mut query: Vec<(&str, &str)> = vec![("page", &page_str), ("size", &size_str)];
-    if reverse {
-        rev_str = "true".to_owned();
-        query.push(("reverse", &rev_str));
-    }
 
-    let resp: PageResponse<T> = http.post(route, body, &query).await?;
+    let resp: PageResponse<T> = {
+        let page_str = page.to_string();
+        let query = build_page_query(&page_str, &size_str, reverse);
+        http.post(route, body, &query).await?
+    };
 
     let http_clone = http.clone();
-    let route_owned = route.to_owned();
-    let body_clone = body.cloned();
+    // O(1)-cloneable captures: `Arc<str>` for the route and `Arc<Value>` for the
+    // request body, avoiding a deep clone of either on every page fetch.
+    let route_arc: Arc<str> = Arc::from(route);
+    let body_arc: Option<Arc<serde_json::Value>> = body.map(|b| Arc::new(b.clone()));
 
     Ok(resp.with_fetcher(move |page_num| {
         let http = http_clone.clone();
-        let route = route_owned.clone();
-        let body = body_clone.clone();
+        let route = Arc::clone(&route_arc);
+        let body = body_arc.clone();
+        let size_str = size_str.clone();
         Box::pin(async move {
             let page_str = page_num.to_string();
-            let size_str = size.to_string();
-            let rev_str;
-            let mut query: Vec<(&str, &str)> = vec![("page", &page_str), ("size", &size_str)];
-            if reverse {
-                rev_str = "true".to_owned();
-                query.push(("reverse", &rev_str));
-            }
-            let resp: PageResponse<T> = http.post(&route, body.as_ref(), &query).await?;
+            let query = build_page_query(&page_str, &size_str, reverse);
+            let resp: PageResponse<T> = http.post(&route, body.as_deref(), &query).await?;
             Ok(resp)
         })
     }))
@@ -483,7 +552,7 @@ pub(crate) fn validate_pagination(page: u64, size: u64) -> Result<()> {
             "page must be greater than or equal to 1".into(),
         ));
     }
-    if !(1..=100).contains(&size) {
+    if !(1..=MAX_PAGE_SIZE).contains(&size) {
         return Err(HonchoError::Validation(
             "size must be between 1 and 100".into(),
         ));

@@ -556,7 +556,10 @@ impl Honcho {
         self.ensure_workspace().await?;
         let body = crate::types::workspace::WorkspaceSearchRequest {
             query: query.to_owned(),
-            limit: limit.unwrap_or(10),
+            // Pass the caller's `limit` straight through: `None` is omitted on
+            // the wire so the server applies its own default instead of the SDK
+            // silently imposing one.
+            limit,
             filters,
         };
         let responses: Vec<MessageResponse> = self

@@ -61,9 +61,9 @@ async fn search_returns_messages() {
 
     mount_ensure_workspace(&server).await;
 
+    // limit omitted: SDK no longer injects a silent default (server decides).
     let search_body = serde_json::json!({
-        "query": "hello",
-        "limit": 10
+        "query": "hello"
     });
 
     Mock::given(method("POST"))

@@ -1336,6 +1336,7 @@ mod tests {
 
         let expected_body = serde_json::json!({
             "query": "preferences",
+            "top_k": 10,
             "filters": {
                 "observer_id": "alice",
                 "observed_id": "bob",
@@ -1499,6 +1500,7 @@ mod tests {
         // Step 3: Query
         let query_body = serde_json::json!({
             "query": "preferences",
+            "top_k": 10,
             "filters": {
                 "observer_id": "alice",
                 "observed_id": "bob",

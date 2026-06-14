@@ -51,7 +51,7 @@ pub struct SessionCreate {
 
 impl SessionCreate {
     /// Validate session ID constraints.
-    pub fn validate(&self) -> std::result::Result<(), crate::error::HonchoError> {
+    pub fn validate(&self) -> crate::error::Result<()> {
         if self.id.is_empty() {
             return Err(crate::error::HonchoError::Validation(
                 "session id must not be empty".into(),
@@ -97,7 +97,7 @@ pub struct SessionGet {
 
 /// Request body for setting session metadata.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionMetadataSet {
     /// Metadata to set.
     pub metadata: HashMap<String, serde_json::Value>,
@@ -105,7 +105,7 @@ pub struct SessionMetadataSet {
 
 /// Request body for setting session configuration.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionConfigurationSet {
     /// Configuration to set.
     pub configuration: HashMap<String, serde_json::Value>,
@@ -140,8 +140,7 @@ pub struct SessionConfiguration {
 
 /// Per-peer observation settings within a session.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPeerConfig {
     /// Whether Honcho will use reasoning to form a representation of this peer.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,7 +206,7 @@ pub(crate) fn validate_search_params(
     search_top_k: Option<u32>,
     search_max_distance: Option<f64>,
     max_conclusions: Option<u32>,
-) -> std::result::Result<(), crate::error::HonchoError> {
+) -> crate::error::Result<()> {
     if let Some(k) = search_top_k
         && !(SEARCH_TOP_K_MIN..=SEARCH_TOP_K_MAX).contains(&k)
     {
@@ -234,7 +233,19 @@ pub(crate) fn validate_search_params(
 
 impl SessionContextOptions {
     /// Validate cross-field constraints.
-    pub fn validate(&self) -> std::result::Result<(), crate::error::HonchoError> {
+    ///
+    /// Enforces that `peer_perspective` and `search_query` each require
+    /// `peer_target`, that range-bounded numeric fields are in range, and that
+    /// `tokens` (when set) is non-zero.
+    ///
+    /// Note: `search_top_k` and `search_max_distance` only take effect together
+    /// with `search_query`, and `max_conclusions` together with
+    /// `include_most_frequent`. They are intentionally NOT hard-rejected when
+    /// their companion is absent: the server ignores them in that case, and
+    /// rejecting locally would couple this client to server-side semantics that
+    /// may relax over time. Setting them without their companion is therefore a
+    /// no-op rather than an error.
+    pub fn validate(&self) -> crate::error::Result<()> {
         if self.peer_perspective.is_some() && self.peer_target.is_none() {
             return Err(crate::error::HonchoError::Validation(
                 "peer_perspective requires peer_target to be set".into(),
@@ -260,48 +271,56 @@ impl SessionContextOptions {
         Ok(())
     }
 
-    pub(crate) fn to_query_params(&self) -> Vec<(&str, String)> {
-        let mut params: Vec<(&str, String)> = vec![
+    /// Render the options as query-string key/value pairs.
+    ///
+    /// Returns borrowed `&'static str` keys and `Cow` values so that string
+    /// options (`peer_target`, `peer_perspective`, `search_query`) and boolean
+    /// literals are borrowed without allocation; only numeric values that must
+    /// be formatted are owned. This avoids the clone-then-discard round-trip a
+    /// `Vec<(&str, String)>` would force on the caller.
+    pub(crate) fn to_query_params(&self) -> Vec<(&'static str, std::borrow::Cow<'_, str>)> {
+        use std::borrow::Cow;
+
+        let mut params: Vec<(&'static str, Cow<'_, str>)> = vec![
             (
                 "summary",
-                if self.summary { "true" } else { "false" }.to_string(),
+                Cow::Borrowed(if self.summary { "true" } else { "false" }),
             ),
             (
                 "limit_to_session",
-                if self.limit_to_session {
+                Cow::Borrowed(if self.limit_to_session {
                     "true"
                 } else {
                     "false"
-                }
-                .to_string(),
+                }),
             ),
         ];
         if let Some(v) = self.tokens {
-            params.push(("tokens", v.to_string()));
+            params.push(("tokens", Cow::Owned(v.to_string())));
         }
         if let Some(ref v) = self.peer_target {
-            params.push(("peer_target", v.clone()));
+            params.push(("peer_target", Cow::Borrowed(v.as_str())));
         }
         if let Some(ref v) = self.peer_perspective {
-            params.push(("peer_perspective", v.clone()));
+            params.push(("peer_perspective", Cow::Borrowed(v.as_str())));
         }
         if let Some(ref v) = self.search_query {
-            params.push(("search_query", v.clone()));
+            params.push(("search_query", Cow::Borrowed(v.as_str())));
         }
         if let Some(v) = self.search_top_k {
-            params.push(("search_top_k", v.to_string()));
+            params.push(("search_top_k", Cow::Owned(v.to_string())));
         }
         if let Some(v) = self.search_max_distance {
-            params.push(("search_max_distance", v.to_string()));
+            params.push(("search_max_distance", Cow::Owned(v.to_string())));
         }
         if let Some(v) = self.include_most_frequent {
             params.push((
                 "include_most_frequent",
-                if v { "true" } else { "false" }.to_string(),
+                Cow::Borrowed(if v { "true" } else { "false" }),
             ));
         }
         if let Some(v) = self.max_conclusions {
-            params.push(("max_conclusions", v.to_string()));
+            params.push(("max_conclusions", Cow::Owned(v.to_string())));
         }
         params
     }
@@ -309,6 +328,29 @@ impl SessionContextOptions {
 
 fn default_true() -> bool {
     true
+}
+
+/// Escape a value before interpolating it into a pseudo-XML `<tag>…</tag>`
+/// wrapper.
+///
+/// Security control: context values (summaries, peer representations, peer
+/// cards) are influenced by session content and are therefore attacker-
+/// controllable. Without escaping, a value containing e.g. `</summary>` would
+/// break out of its tag framing, corrupting the message structure and enabling
+/// prompt injection. We HTML-escape `&`, `<`, and `>` (ampersand first, so the
+/// substitution stays unambiguous and reversible), which makes it impossible
+/// for a value to forge or close a tag.
+fn escape_tag_value(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.contains(['&', '<', '>']) {
+        std::borrow::Cow::Owned(
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
 }
 
 /// Context returned when requesting session state.
@@ -332,7 +374,7 @@ pub struct SessionContext {
 
 /// Summaries for a session (short and/or long).
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummaries {
     /// Session identifier.
     pub id: String,
@@ -353,11 +395,18 @@ pub enum SummaryType {
     Short,
     /// Long summary generated less frequently.
     Long,
+    /// A summary type not recognized by this client version.
+    ///
+    /// Acts as a forward-compatibility catch-all: a new summary type added
+    /// server-side deserializes here instead of failing the whole
+    /// `SessionContext` deserialization.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A session summary covering messages up to a point.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Summary {
     /// The summary text.
     pub content: String,
@@ -410,6 +459,8 @@ pub type SessionPage = super::pagination::Page<Session>;
 /// Implemented for `&str`, `String`, and `&Peer` so that
 /// [`SessionContext::to_openai`] and [`SessionContext::to_anthropic`]
 /// can accept any of these without extra boilerplate.
+// NOTE: trait name retained for public-API stability; any rename is a
+// separate breaking change deferred to a future major release.
 pub trait IntoAssistantRef {
     /// Return the string name/id to use as the assistant.
     fn as_assistant_name(&self) -> &str;
@@ -435,10 +486,15 @@ impl IntoAssistantRef for &crate::Peer {
 
 impl SessionContext {
     /// Format a peer card into a single displayable string.
+    ///
+    /// Each item is single-quoted with backslash escaping. The backslash is
+    /// escaped FIRST, then the single quote, so the output is unambiguous and
+    /// parseable: a trailing `\` cannot consume the closing quote (e.g. `foo\`
+    /// becomes `'foo\\'`, not `'foo\'`).
     fn format_peer_card(card: &[String]) -> String {
         let items: Vec<String> = card
             .iter()
-            .map(|s| format!("'{}'", s.replace('\'', "\\'")))
+            .map(|s| format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")))
             .collect();
         format!("[{}]", items.join(", "))
     }
@@ -470,6 +526,35 @@ impl SessionContext {
         msgs
     }
 
+    /// Build a provider message list.
+    ///
+    /// Shared by [`Self::to_openai`] and [`Self::to_anthropic`]: it emits the
+    /// tag-wrapped context messages with the given `context_role` (escaping
+    /// each value via [`escape_tag_value`] so session-derived content cannot
+    /// break out of the `<tag>…</tag>` framing), then delegates per-message
+    /// rendering to `render_message`, which receives the message and whether it
+    /// belongs to the assistant.
+    fn build_messages(
+        &self,
+        context_role: &'static str,
+        assistant: &str,
+        render_message: impl Fn(&super::message::MessageResponse, bool) -> serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        let mut result: Vec<serde_json::Value> = Vec::with_capacity(self.len());
+        for (tag, value) in self.build_context_messages() {
+            let value = escape_tag_value(&value);
+            result.push(serde_json::json!({
+                "role": context_role,
+                "content": format!("<{tag}>{value}</{tag}>"),
+            }));
+        }
+        for message in &self.messages {
+            let is_assistant = message.peer_id == assistant;
+            result.push(render_message(message, is_assistant));
+        }
+        result
+    }
+
     /// Convert the context to OpenAI-compatible message format.
     ///
     /// System messages (`peer_representation`, `peer_card`, summary) are prepended.
@@ -491,32 +576,13 @@ impl SessionContext {
     #[allow(clippy::needless_pass_by_value)]
     pub fn to_openai(&self, assistant: impl IntoAssistantRef) -> Vec<serde_json::Value> {
         let assistant = assistant.as_assistant_name();
-        let mut result: Vec<serde_json::Value> = Vec::new();
-
-        for (tag, value) in self.build_context_messages() {
-            result.push(serde_json::json!({
-                "role": "system",
-                "content": format!("<{tag}>{value}</{tag}>"),
-            }));
-        }
-
-        for message in &self.messages {
-            if message.peer_id == assistant {
-                result.push(serde_json::json!({
-                    "role": "assistant",
-                    "name": message.peer_id,
-                    "content": message.content,
-                }));
-            } else {
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "name": message.peer_id,
-                    "content": message.content,
-                }));
-            }
-        }
-
-        result
+        self.build_messages("system", assistant, |message, is_assistant| {
+            serde_json::json!({
+                "role": if is_assistant { "assistant" } else { "user" },
+                "name": message.peer_id,
+                "content": message.content,
+            })
+        })
     }
 
     /// Convert the context to Anthropic-compatible message format.
@@ -531,30 +597,19 @@ impl SessionContext {
     #[allow(clippy::needless_pass_by_value)]
     pub fn to_anthropic(&self, assistant: impl IntoAssistantRef) -> Vec<serde_json::Value> {
         let assistant = assistant.as_assistant_name();
-        let mut result: Vec<serde_json::Value> = Vec::new();
-
-        for (tag, value) in self.build_context_messages() {
-            result.push(serde_json::json!({
-                "role": "user",
-                "content": format!("<{tag}>{value}</{tag}>"),
-            }));
-        }
-
-        for message in &self.messages {
-            if message.peer_id == assistant {
-                result.push(serde_json::json!({
+        self.build_messages("user", assistant, |message, is_assistant| {
+            if is_assistant {
+                serde_json::json!({
                     "role": "assistant",
                     "content": message.content,
-                }));
+                })
             } else {
-                result.push(serde_json::json!({
+                serde_json::json!({
                     "role": "user",
                     "content": format!("{}: {}", message.peer_id, message.content),
-                }));
+                })
             }
-        }
-
-        result
+        })
     }
 
     /// Returns the number of entries that `to_openai` / `to_anthropic` would produce.

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use super::common::PeerCardConfiguration;
+
 /// A peer in a Honcho workspace.
 ///
 /// Peers represent participants (users or agents) within a workspace.
@@ -43,6 +45,13 @@ pub struct PeerCreate {
 }
 
 /// Parameters for updating an existing peer.
+///
+/// # Warning: no-op when both fields are `None`
+///
+/// If both `metadata` and `configuration` are `None`, the request body
+/// serializes to `{}`. The server will either perform a silent no-op or
+/// return an error. Ensure at least one field is `Some` before sending.
+/// Compile-time enforcement of this constraint is deferred to PR6.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[builder(on(String, into))]
@@ -69,7 +78,7 @@ pub struct PeerGet {
 
 /// Request body for setting peer metadata.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PeerMetadataSet {
     /// Metadata to set.
     pub metadata: HashMap<String, serde_json::Value>,
@@ -81,7 +90,7 @@ pub struct PeerMetadataSet {
 /// return additional fields not captured here; use the `_raw` escape hatches
 /// on [`crate::Peer`] to access them.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PeerConfig {
     /// Whether Honcho will use reasoning to form a representation of this peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,18 +101,28 @@ pub struct PeerConfig {
 }
 
 /// Request body for setting peer configuration.
+///
+/// # Warning: full-replace (PUT) semantics
+///
+/// This maps to a **PUT** endpoint. The server replaces the **entire** peer
+/// configuration object with the value of `configuration`. Any keys present
+/// server-side but absent from [`PeerConfig`] (e.g. fields added in future
+/// server versions) will be **silently wiped**.
+///
+/// To avoid accidental data loss, read the current configuration first and
+/// merge the desired changes before calling
+/// [`set_configuration`](crate::Peer::set_configuration).
+/// Merge / read-modify-write helpers are deferred to PR6.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PeerConfigurationSet {
     /// Configuration to set.
     pub configuration: PeerConfig,
 }
 
-pub use super::common::PeerCardConfiguration;
-
 /// Response from getting a peer card.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerCardResponse {
     /// The peer card content lines, or `None` if no card exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,17 +131,18 @@ pub struct PeerCardResponse {
 
 /// Request body for setting a peer card.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, bon::Builder)]
 #[builder(on(String, into))]
 #[builder(finish_fn = build)]
 pub struct PeerCardSet {
     /// The peer card content lines to set.
+    #[builder(into)]
     pub peer_card: Vec<String>,
 }
 
 /// Context for a peer, combining representation and peer card.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerContext {
     /// The ID of the observer peer.
     pub peer_id: String,
@@ -157,6 +177,10 @@ pub struct PeerRepresentationGet {
     pub search_top_k: Option<u32>,
     /// Maximum distance for semantically relevant conclusions.
     /// Only used if `search_query` is provided.
+    ///
+    /// Server-validated; range 0.0–1.0. Values outside this range (including
+    /// negative values, values above `1.0`, or `NaN`) are accepted by this
+    /// type but will be rejected by the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_max_distance: Option<f64>,
     /// Whether to include the most frequent conclusions.
@@ -170,6 +194,16 @@ pub struct PeerRepresentationGet {
 }
 
 /// Options for `Peer::context_with_options`.
+///
+/// # Note: floating-point equality
+///
+/// This type derives [`PartialEq`] but contains `search_max_distance:
+/// Option<f64>`. Floating-point `NaN` is never equal to itself
+/// (`NaN != NaN`), so two instances that both carry `NaN` as the distance
+/// will compare as unequal. Avoid relying on `==` when the distance field
+/// may hold `NaN`; write a custom comparator if structural equality is
+/// required. Deriving `Eq` requires a validated newtype and is deferred
+/// to PR6.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bon::Builder)]
 #[builder(on(String, into))]
@@ -184,7 +218,11 @@ pub struct PeerContextOptions {
     /// Number of semantically relevant facts to return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_top_k: Option<u32>,
-    /// Maximum semantic distance for search results (0.0–1.0).
+    /// Maximum semantic distance for search results.
+    ///
+    /// Server-validated; range 0.0–1.0. Values outside this range (including
+    /// negative values, values above `1.0`, or `NaN`) are accepted by this
+    /// type but will be rejected by the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_max_distance: Option<f64>,
     /// Whether to include the most frequent conclusions.
@@ -197,3 +235,53 @@ pub struct PeerContextOptions {
 
 /// A page of [`Peer`] results from a paginated list endpoint.
 pub type PeerPage = super::pagination::Page<Peer>;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_config_is_eq() {
+        let a = PeerConfig {
+            observe_me: Some(true),
+            observe_others: None,
+        };
+        assert_eq!(a, a.clone());
+    }
+
+    #[test]
+    fn peer_configuration_set_is_eq() {
+        let a = PeerConfigurationSet {
+            configuration: PeerConfig::default(),
+        };
+        assert_eq!(a, a.clone());
+    }
+
+    #[test]
+    fn peer_card_response_is_eq() {
+        let a = PeerCardResponse {
+            peer_card: Some(vec!["line".to_string()]),
+        };
+        assert_eq!(a, a.clone());
+    }
+
+    #[test]
+    fn peer_card_set_is_eq() {
+        let a = PeerCardSet {
+            peer_card: vec!["line".to_string()],
+        };
+        assert_eq!(a, a.clone());
+    }
+
+    #[test]
+    fn peer_context_is_eq() {
+        let a = PeerContext {
+            peer_id: "p1".to_string(),
+            target_id: "p2".to_string(),
+            representation: None,
+            peer_card: None,
+        };
+        assert_eq!(a, a.clone());
+    }
+}

@@ -3,7 +3,7 @@
 mod common;
 
 use common::{load_fixture, roundtrip, validate_openapi};
-use honcho_ai::types::validation::{HTTPValidationError, LocationSegment, ValidationError};
+use honcho_ai::types::validation::{Detail, HTTPValidationError, LocationSegment, ValidationError};
 
 use serde_json::json;
 
@@ -64,7 +64,7 @@ fn validation_error_optional_fields_present_in_max() {
 fn http_validation_error_max_has_two_details() {
     let fixture = load_fixture("HTTPValidationError", "max");
     let http: HTTPValidationError = serde_json::from_value(fixture).unwrap();
-    assert_eq!(http.detail.len(), 2);
+    assert_eq!(http.errors().len(), 2);
 }
 
 #[test]
@@ -89,4 +89,70 @@ fn skip_serializing_none_optional_fields() {
     let json_val = serde_json::to_value(&ve).unwrap();
     assert!(!json_val.as_object().unwrap().contains_key("input"));
     assert!(!json_val.as_object().unwrap().contains_key("ctx"));
+}
+
+#[test]
+fn http_validation_error_string_detail() {
+    // FastAPI's `HTTPException(422, detail="msg")` returns a string, not an array.
+    let http: HTTPValidationError = serde_json::from_value(json!({ "detail": "msg" })).unwrap();
+    assert_eq!(http.detail, Detail::Message("msg".to_string()));
+    assert_eq!(http.message(), Some("msg"));
+    assert!(http.errors().is_empty());
+}
+
+#[test]
+fn http_validation_error_absent_detail_defaults_empty() {
+    // `detail` is not required per OpenAPI; an empty body must still deserialize.
+    let http: HTTPValidationError = serde_json::from_value(json!({})).unwrap();
+    assert!(http.errors().is_empty());
+    assert_eq!(http.message(), None);
+    assert_eq!(http.detail, Detail::Errors(Vec::new()));
+}
+
+#[test]
+fn http_validation_error_array_detail() {
+    let http: HTTPValidationError = serde_json::from_value(json!({
+        "detail": [
+            {
+                "loc": ["body", "name"],
+                "msg": "field required",
+                "type": "value_error.missing"
+            }
+        ]
+    }))
+    .unwrap();
+    assert!(matches!(http.detail, Detail::Errors(_)));
+    assert_eq!(http.errors().len(), 1);
+    assert_eq!(http.message(), None);
+}
+
+#[test]
+fn location_segment_other_catches_non_string_non_integer() {
+    // null / float loc elements must deserialize via the `Other` catch-all
+    // rather than failing the whole error body.
+    let seg: LocationSegment = serde_json::from_value(json!(null)).unwrap();
+    assert!(matches!(seg, LocationSegment::Other(_)));
+
+    let seg: LocationSegment = serde_json::from_value(json!(3.5)).unwrap();
+    assert!(matches!(seg, LocationSegment::Other(_)));
+}
+
+#[test]
+fn loc_path_renders_dotted_indexed_path() {
+    let ve: ValidationError = serde_json::from_value(json!({
+        "loc": ["body", "items", 0, "name"],
+        "msg": "field required",
+        "type": "value_error.missing"
+    }))
+    .unwrap();
+    assert_eq!(ve.loc_path(), "body.items[0].name");
+}
+
+#[test]
+fn location_segment_display() {
+    assert_eq!(
+        LocationSegment::String("body".to_string()).to_string(),
+        "body"
+    );
+    assert_eq!(LocationSegment::Integer(7).to_string(), "7");
 }
