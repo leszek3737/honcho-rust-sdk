@@ -575,12 +575,14 @@ impl Session {
         Ok(())
     }
 
-    /// GET the current session state, refresh the cache, and return the response.
+    /// Re-fetch the current session state, refresh the cache, and return the
+    /// response.
     ///
-    /// Uses `GET /sessions/{id}` (read-only) rather than the get-or-create POST,
-    /// so a session deleted on the server surfaces as a `404`/`NotFound` instead
-    /// of being silently recreated. Callers that need the fresh metadata or
-    /// configuration should read it from the returned response to avoid a
+    /// The server exposes no `GET /sessions/{id}` (it answers `405`), so this
+    /// reads through the get-or-create `POST /sessions` collection endpoint.
+    /// One consequence: a session deleted server-side is silently re-created
+    /// rather than surfacing as `NotFound`. Callers that need the fresh metadata
+    /// or configuration should read it from the returned response to avoid a
     /// refresh-then-read race against concurrent writers.
     async fn refresh_into(&self) -> Result<SessionResponse> {
         // The individual-resource path (`GET /v3/workspaces/{ws}/sessions/{id}`)
@@ -2097,8 +2099,11 @@ mod tests {
         assert_eq!(session.metadata().unwrap().get("topic").unwrap(), "fresh");
     }
 
+    // A real get-or-create `POST /sessions` re-creates a missing session (200),
+    // so "deleted session" never yields 404 in practice; this just verifies the
+    // SDK surfaces a server 404 as `NotFound` rather than swallowing it.
     #[tokio::test]
-    async fn refresh_on_deleted_session_returns_not_found() {
+    async fn refresh_surfaces_server_404_as_not_found() {
         let server = MockServer::start().await;
         let http =
             HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();

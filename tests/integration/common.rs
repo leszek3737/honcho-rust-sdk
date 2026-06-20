@@ -187,6 +187,10 @@ impl Drop for WorkspaceGuard {
 /// that shifted forward. `session(id).build()` re-asserts the session (a cheap
 /// upsert) to obtain a handle, then deletes it — there is no by-id delete on the
 /// public client surface.
+///
+/// Deletion is best-effort: a single failing session is logged and skipped
+/// rather than `?`-aborting, since one flaky delete would otherwise leave the
+/// rest intact and re-trigger the 409 that blocks workspace teardown.
 async fn delete_all_sessions(client: &Honcho) -> honcho_ai::error::Result<usize> {
     let mut ids = Vec::new();
     let mut page = client.sessions().await?;
@@ -197,10 +201,17 @@ async fn delete_all_sessions(client: &Honcho) -> honcho_ai::error::Result<usize>
             None => break,
         }
     }
+    let mut deleted = 0;
     for id in &ids {
-        client.session(id.clone()).build().await?.delete().await?;
+        match client.session(id.clone()).build().await {
+            Ok(session) => match session.delete().await {
+                Ok(()) => deleted += 1,
+                Err(e) => eprintln!("  warning: failed to delete session {id}: {e}"),
+            },
+            Err(e) => eprintln!("  warning: failed to resolve session {id} for delete: {e}"),
+        }
     }
-    Ok(ids.len())
+    Ok(deleted)
 }
 
 #[cfg(test)]
