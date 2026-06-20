@@ -49,8 +49,10 @@ async fn main() -> honcho_ai::error::Result<()> {
 
     // Session search constrained by a metadata filter (the example's namesake):
     // only messages tagged `topic = hobbies` are searched. The query term
-    // matches the seeded "weekends" content above.
-    let filters = HashMap::from([("topic".into(), "hobbies".into())]);
+    // matches the seeded "weekends" content above. Metadata filters must be
+    // nested under a `metadata` key; a flat `{"topic": ...}` is rejected by the
+    // server as an unknown column.
+    let filters = HashMap::from([("metadata".into(), serde_json::json!({ "topic": "hobbies" }))]);
     let sess_search_opts = MessageSearchOptions::builder()
         .query("weekends")
         .filters(filters)

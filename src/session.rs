@@ -329,6 +329,28 @@ impl UploadFileBuilder<'_> {
         tracing::instrument(skip(self), name = "upload_file_send")
     )]
     pub async fn send(self) -> Result<Vec<crate::Message>> {
+        // Local items are hoisted to the top of the scope (items-after-statements).
+        // `Resolved` normalizes the source to a single in-memory representation so
+        // the form-building match has only two arms; `FormFactory` is the per-retry
+        // form builder (see the usage sites below for the rationale).
+        enum Resolved {
+            Path {
+                path: std::path::PathBuf,
+                filename: String,
+            },
+            Bytes {
+                filename: String,
+                bytes: bytes::Bytes,
+                content_type: String,
+            },
+        }
+        type FormFactory = Box<
+            dyn Fn() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<Form>> + Send + 'static>,
+                > + Send
+                + 'static,
+        >;
+
         let add_text_fields = serialize_upload_fields(&self)?;
 
         let Some(peer_id) = self.peer_id else {
@@ -342,18 +364,6 @@ impl UploadFileBuilder<'_> {
         // buffered into `Bytes` here so the form-building match has only two arms
         // (disk-streamed `Path` vs. in-memory `Bytes`). The `Bytes` payload makes
         // per-retry clones cheap refcount bumps instead of full buffer copies.
-        enum Resolved {
-            Path {
-                path: std::path::PathBuf,
-                filename: String,
-            },
-            Bytes {
-                filename: String,
-                bytes: bytes::Bytes,
-                content_type: String,
-            },
-        }
-
         let resolved = match source {
             FileSource::Path(path) => {
                 // Derive (and validate) the multipart filename up front so an
@@ -393,12 +403,6 @@ impl UploadFileBuilder<'_> {
 
         // FileSource::Path — Part::file() streams from disk, re-opens on retry.
         // Resolved::Bytes — in-memory payload, cheap to clone per retry.
-        type FormFactory = Box<
-            dyn Fn() -> std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<Form>> + Send + 'static>,
-                > + Send
-                + 'static,
-        >;
         let form_factory: FormFactory = match resolved {
             Resolved::Path { path, filename } => Box::new(move || {
                 let path = path.clone();
@@ -579,11 +583,23 @@ impl Session {
     /// configuration should read it from the returned response to avoid a
     /// refresh-then-read race against concurrent writers.
     async fn refresh_into(&self) -> Result<SessionResponse> {
+        // The individual-resource path (`GET /v3/workspaces/{ws}/sessions/{id}`)
+        // is not exposed by the server — only `PUT`/`DELETE` are — so reads go
+        // through the collection get-or-create, which returns the full session
+        // without mutating it: `SessionCreate` skips its `None` fields, so the
+        // request body is just `{"id": …}`.
+        let body = crate::types::session::SessionCreate {
+            id: self.inner.id.clone(),
+            metadata: None,
+            peers: None,
+            configuration: None,
+        };
         let resp: SessionResponse = self
             .inner
             .http
-            .get(
-                &routes::session(&self.inner.workspace_id, &self.inner.id)?,
+            .post(
+                &routes::sessions(&self.inner.workspace_id)?,
+                Some(&body),
                 &[],
             )
             .await?;
@@ -684,11 +700,18 @@ impl Session {
     /// Use this when the server returns fields not yet represented in
     /// [`SessionConfiguration`].
     pub async fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
+        let body = crate::types::session::SessionCreate {
+            id: self.inner.id.clone(),
+            metadata: None,
+            peers: None,
+            configuration: None,
+        };
         let raw: serde_json::Value = self
             .inner
             .http
-            .get(
-                &routes::session(&self.inner.workspace_id, &self.inner.id)?,
+            .post(
+                &routes::sessions(&self.inner.workspace_id)?,
+                Some(&body),
                 &[],
             )
             .await?;
@@ -2047,15 +2070,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_uses_get_and_updates_all_cache_fields() {
+    async fn refresh_uses_get_or_create_and_updates_all_cache_fields() {
         let server = MockServer::start().await;
         let http =
             HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
         let session = make_session(http, "sess1");
         assert!(session.is_active());
 
-        Mock::given(method("GET"))
-            .and(path("/v3/workspaces/ws1/sessions/sess1"))
+        // No `GET /sessions/{id}` exists server-side; reads go through the
+        // get-or-create `POST /sessions` collection endpoint.
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/sessions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "sess1",
                 "workspace_id": "ws1",
@@ -2079,8 +2104,8 @@ mod tests {
             HttpClient::from_params(HttpClient::builder().base_url(server.uri()).build()).unwrap();
         let session = make_session(http, "sess1");
 
-        Mock::given(method("GET"))
-            .and(path("/v3/workspaces/ws1/sessions/sess1"))
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/sessions"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;

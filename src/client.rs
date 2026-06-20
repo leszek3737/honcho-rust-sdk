@@ -301,15 +301,28 @@ impl Honcho {
         &self.inner.http
     }
 
+    /// Fetch the workspace via the get-or-create `POST /v3/workspaces` endpoint.
+    ///
+    /// The individual-resource path (`GET /v3/workspaces/{id}`) is not exposed
+    /// by the server — only `PUT`/`DELETE` are — so reads go through the
+    /// collection get-or-create, which returns the full workspace without
+    /// mutating it: `WorkspaceCreate` skips its `None` fields, so the request
+    /// body is just `{"id": …}`. This doubles as the lazy workspace-ensure.
+    async fn fetch_workspace(&self) -> Result<Workspace> {
+        let body = crate::types::workspace::WorkspaceCreate {
+            id: self.inner.workspace_id.to_string(),
+            metadata: None,
+            configuration: None,
+        };
+        self.inner
+            .http
+            .post(&routes::workspaces(), Some(&body), &[])
+            .await
+    }
+
     /// Fetch workspace metadata from the server.
     pub async fn get_metadata(&self) -> Result<HashMap<String, Value>> {
-        self.ensure_workspace().await?;
-        let ws: Workspace = self
-            .inner
-            .http
-            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
-            .await?;
-        Ok(ws.metadata)
+        Ok(self.fetch_workspace().await?.metadata)
     }
 
     /// Set workspace metadata on the server.
@@ -339,13 +352,7 @@ impl Honcho {
     /// }
     /// ```
     pub async fn get_configuration(&self) -> Result<WorkspaceConfiguration> {
-        self.ensure_workspace().await?;
-        let ws: Workspace = self
-            .inner
-            .http
-            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
-            .await?;
-        Ok(ws.configuration)
+        Ok(self.fetch_workspace().await?.configuration)
     }
 
     /// Set workspace configuration from a typed [`WorkspaceConfiguration`].
@@ -399,11 +406,15 @@ impl Honcho {
     /// Use this when the server returns fields not yet represented in
     /// [`WorkspaceConfiguration`].
     pub async fn get_configuration_raw(&self) -> Result<HashMap<String, Value>> {
-        self.ensure_workspace().await?;
+        let body = crate::types::workspace::WorkspaceCreate {
+            id: self.inner.workspace_id.to_string(),
+            metadata: None,
+            configuration: None,
+        };
         let raw: serde_json::Value = self
             .inner
             .http
-            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
+            .post(&routes::workspaces(), Some(&body), &[])
             .await?;
         // Take ownership of the parsed JSON and move the `configuration` object
         // out of it — no per-entry cloning.
@@ -539,12 +550,7 @@ impl Honcho {
     /// # }
     /// ```
     pub async fn refresh(&self) -> Result<()> {
-        self.ensure_workspace().await?;
-        let _: Workspace = self
-            .inner
-            .http
-            .get(&routes::workspace(&self.inner.workspace_id)?, &[])
-            .await?;
+        self.fetch_workspace().await?;
         Ok(())
     }
 
@@ -1088,19 +1094,14 @@ mod tests {
         );
     }
 
-    // Task 6: getters that previously skipped `ensure_workspace` now call it,
-    // matching their siblings (peer/session/search). `refresh` should ensure
-    // the workspace (POST) before fetching it (GET).
+    // The server exposes no `GET /v3/workspaces/{id}` (only PUT/DELETE), so
+    // `refresh` reads through the get-or-create `POST /v3/workspaces` endpoint —
+    // a single round-trip that both ensures and fetches the workspace.
     #[tokio::test]
-    async fn refresh_ensures_workspace_first() {
+    async fn refresh_uses_get_or_create() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v3/workspaces"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v3/workspaces/ws-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(workspace_body()))
             .mount(&server)
             .await;
@@ -1111,7 +1112,7 @@ mod tests {
         assert_eq!(
             ensure_hits(&server).await,
             1,
-            "refresh must ensure the workspace before fetching it"
+            "refresh must read the workspace via a single get-or-create POST"
         );
     }
 }

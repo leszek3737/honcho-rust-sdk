@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use common::{
-    TEST_WORKSPACE_ID, make_honcho, mount_workspace_ensure, workspace_ensure_mock,
+    TEST_WORKSPACE_ID, make_honcho, mount_workspace_ensure, peer_response, workspace_ensure_mock,
     workspace_response,
 };
 use honcho_ai::error::HonchoError;
@@ -37,7 +37,8 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 ///
 /// `force_ensure` resets the cache on each call, so it cannot exhibit
 /// single-flight; the property is proven here through the lazy path that
-/// `force_ensure` builds on, driven via the public `get_configuration_raw`.
+/// `force_ensure` builds on, driven via the public `peer(..).build()` (which
+/// ensures the workspace before creating the peer).
 /// `tokio::sync::OnceCell` serializes initialization internally, so the single
 /// POST is guaranteed regardless of scheduling — the test is deterministic.
 #[tokio::test(flavor = "multi_thread")]
@@ -49,14 +50,12 @@ async fn ensure_workspace_single_flight_collapses_concurrent_calls() {
     // The ensure POST must fire exactly once despite N racing callers.
     mount_workspace_ensure(&server, 1).await;
 
-    // `get_configuration_raw` GETs the workspace after ensuring it; this GET is
-    // not single-flighted, so it has no call-count expectation.
-    let config_path = format!("/v3/workspaces/{TEST_WORKSPACE_ID}");
-    Mock::given(method("GET"))
-        .and(path(config_path))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(TEST_WORKSPACE_ID)),
-        )
+    // `peer(..).build()` POSTs to the peers collection after ensuring the
+    // workspace; this peer POST is not single-flighted, so it has no call-count
+    // expectation.
+    Mock::given(method("POST"))
+        .and(path(format!("/v3/workspaces/{TEST_WORKSPACE_ID}/peers")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_response("ensure-probe")))
         .mount(&server)
         .await;
 
@@ -65,7 +64,9 @@ async fn ensure_workspace_single_flight_collapses_concurrent_calls() {
     let mut handles = Vec::with_capacity(N);
     for _ in 0..N {
         let h = honcho.clone();
-        handles.push(tokio::spawn(async move { h.get_configuration_raw().await }));
+        handles.push(tokio::spawn(
+            async move { h.peer("ensure-probe").build().await },
+        ));
     }
     for handle in handles {
         // Outer `unwrap`: task did not panic. Inner `unwrap`: request was `Ok`.

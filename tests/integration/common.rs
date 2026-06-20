@@ -158,11 +158,49 @@ impl Drop for WorkspaceGuard {
             return;
         };
         // `block_in_place` requires the multi-thread runtime asserted in `new`.
-        tokio::task::block_in_place(|| match handle.block_on(client.delete_workspace(ws_id)) {
-            Ok(()) => eprintln!("  cleaned up workspace {ws_id}"),
-            Err(e) => eprintln!("  warning: failed to delete workspace {ws_id}: {e}"),
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                // The server refuses to delete a workspace while active sessions
+                // remain (HTTP 409 "Delete all sessions first"), so drain sessions
+                // before the workspace. Without this, every test that creates a
+                // session leaks its workspace on the server.
+                match delete_all_sessions(client).await {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("  deleted {n} session(s) in workspace {ws_id}"),
+                    Err(e) => {
+                        eprintln!("  warning: failed to delete sessions in {ws_id}: {e}");
+                    }
+                }
+                match client.delete_workspace(ws_id).await {
+                    Ok(()) => eprintln!("  cleaned up workspace {ws_id}"),
+                    Err(e) => eprintln!("  warning: failed to delete workspace {ws_id}: {e}"),
+                }
+            });
         });
     }
+}
+
+/// Deletes every session in the client's workspace, returning the count removed.
+///
+/// Collects all ids across every page *first*, then deletes — deleting mid-walk
+/// would renumber the remaining pages and let `next_page()` skip the sessions
+/// that shifted forward. `session(id).build()` re-asserts the session (a cheap
+/// upsert) to obtain a handle, then deletes it — there is no by-id delete on the
+/// public client surface.
+async fn delete_all_sessions(client: &Honcho) -> honcho_ai::error::Result<usize> {
+    let mut ids = Vec::new();
+    let mut page = client.sessions().await?;
+    loop {
+        ids.extend(page.items_ref().iter().map(|s| s.id.clone()));
+        match page.next_page().await? {
+            Some(next) => page = next,
+            None => break,
+        }
+    }
+    for id in &ids {
+        client.session(id.clone()).build().await?.delete().await?;
+    }
+    Ok(ids.len())
 }
 
 #[cfg(test)]

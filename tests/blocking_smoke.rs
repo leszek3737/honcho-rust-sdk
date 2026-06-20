@@ -661,10 +661,10 @@ async fn blocking_peer_representation_builder_with_options() {
 async fn blocking_client_get_configuration() {
     let server = MockServer::start().await;
 
-    mount_ensure_ws(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/ws1"))
+    // Reads go through the get-or-create `POST /v3/workspaces` (the server
+    // exposes no `GET /v3/workspaces/{id}`), which returns the full workspace.
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ws_json_with_config()))
         .mount(&server)
         .await;
@@ -939,10 +939,10 @@ async fn blocking_client_delete_workspace() {
 async fn blocking_client_get_metadata() {
     let server = MockServer::start().await;
 
-    mount_ensure_ws(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/ws1"))
+    // Reads go through the get-or-create `POST /v3/workspaces` (the server
+    // exposes no `GET /v3/workspaces/{id}`), which returns the full workspace.
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "ws1",
             "metadata": {"env": "test"},
@@ -986,17 +986,17 @@ async fn blocking_client_set_metadata() {
 async fn blocking_client_refresh() {
     let server = MockServer::start().await;
 
-    mount_ensure_ws(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/v3/workspaces/ws1"))
+    // `refresh` reads through the get-or-create `POST /v3/workspaces` (the
+    // server exposes no `GET /v3/workspaces/{id}`): one round-trip that both
+    // ensures and fetches the workspace.
+    Mock::given(method("POST"))
+        .and(path("/v3/workspaces"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "ws1",
             "metadata": {"env": "test"},
             "configuration": {"reasoning": {"enabled": true}},
             "created_at": "2025-01-15T10:30:00Z"
         })))
-        .up_to_n_times(3)
         .expect(1)
         .mount(&server)
         .await;
