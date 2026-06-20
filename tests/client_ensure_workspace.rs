@@ -9,39 +9,42 @@ use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 mod common;
-use common::{TEST_WORKSPACE_ID, make_honcho, mount_workspace_ensure, workspace_response};
+use common::{
+    TEST_WORKSPACE_ID, make_honcho, mount_workspace_ensure, peer_response, workspace_response,
+};
 
-/// Mounts `GET /v3/workspaces/ws1` returning the workspace body.
+/// Mounts `POST /v3/workspaces/ws1/peers` returning a peer body.
 ///
-/// The lazy `ensure_workspace` path (driven via `get_configuration_raw`)
-/// fetches the workspace after ensuring it exists, so every lazy-path test
-/// needs this GET in place alongside the ensure POST.
-async fn mount_workspace_get(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path(format!("/v3/workspaces/{TEST_WORKSPACE_ID}")))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(workspace_response(TEST_WORKSPACE_ID)),
-        )
+/// The lazy `ensure_workspace` path is driven here via `peer(..).build()`:
+/// `peer` ensures the workspace (POST `/v3/workspaces`) before creating the
+/// peer (POST `/v3/workspaces/ws1/peers`). The two POSTs hit distinct paths, so
+/// the peer POST is a clean driver that does not perturb the ensure call-count.
+/// (Reads like `get_metadata` no longer go through the lazy ensure: they read
+/// via their own get-or-create POST, since the server exposes no resource GET.)
+async fn mount_peer_create(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path(format!("/v3/workspaces/{TEST_WORKSPACE_ID}/peers")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_response("ensure-probe")))
         .mount(server)
         .await;
 }
 
 #[tokio::test]
 async fn ensure_workspace_cached_on_single_instance() {
-    // The lazy `ensure_workspace()` path (driven here by `get_configuration_raw`)
+    // The lazy `ensure_workspace()` path (driven here by `peer(..).build()`)
     // is single-flight AND caches success: repeated calls on one client issue the
     // ensure POST at most once.
     let server = MockServer::start().await;
     mount_workspace_ensure(&server, 1).await;
-    mount_workspace_get(&server).await;
+    mount_peer_create(&server).await;
 
     let honcho = make_honcho(&server.uri());
 
     // Three sequential calls; success is cached after the first, so the
     // `.expect(1)` on the ensure POST still holds.
-    honcho.get_configuration_raw().await.unwrap();
-    honcho.get_configuration_raw().await.unwrap();
-    honcho.get_configuration_raw().await.unwrap();
+    honcho.peer("ensure-probe").build().await.unwrap();
+    honcho.peer("ensure-probe").build().await.unwrap();
+    honcho.peer("ensure-probe").build().await.unwrap();
 
     server.verify().await;
 }
@@ -62,14 +65,14 @@ async fn ensure_workspace_concurrent_calls_only_one_request() {
         .expect(1)
         .mount(&server)
         .await;
-    mount_workspace_get(&server).await;
+    mount_peer_create(&server).await;
 
     let honcho = make_honcho(&server.uri());
 
     let handles: Vec<_> = (0..5)
         .map(|_| {
             let h = honcho.clone();
-            tokio::spawn(async move { h.get_configuration_raw().await })
+            tokio::spawn(async move { h.peer("ensure-probe").build().await })
         })
         .collect();
 
@@ -165,12 +168,12 @@ async fn ensure_workspace_init_failure_not_cached_then_concurrent_retry() {
         .expect(2)
         .mount(&server)
         .await;
-    mount_workspace_get(&server).await;
+    mount_peer_create(&server).await;
 
     let honcho = make_honcho(&server.uri());
 
     // First lazy ensure fails; the error is not cached in the OnceCell.
-    let first = honcho.get_configuration_raw().await;
+    let first = honcho.peer("ensure-probe").build().await;
     assert_eq!(first.unwrap_err().status_code(), Some(500));
 
     // Concurrent retry wave: single-flight collapses the retries to one POST,
@@ -178,7 +181,7 @@ async fn ensure_workspace_init_failure_not_cached_then_concurrent_retry() {
     let handles: Vec<_> = (0..5)
         .map(|_| {
             let h = honcho.clone();
-            tokio::spawn(async move { h.get_configuration_raw().await })
+            tokio::spawn(async move { h.peer("ensure-probe").build().await })
         })
         .collect();
     for handle in handles {

@@ -23,7 +23,9 @@ async fn main() -> honcho_ai::error::Result<()> {
         .await?;
     println!("created: {created:?}");
 
-    // Create with session scope (builder has `on(String, into)`, so `&str` works)
+    // Create with session scope. The session must exist before a session-scoped
+    // conclusion references it, otherwise the server returns `NotFound`.
+    honcho.session("sess-1").build().await?;
     let session_scoped = scope
         .create([ConclusionCreateParams::builder()
             .content("Alice prefers async/await")

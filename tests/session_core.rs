@@ -38,6 +38,9 @@ use common::{make_honcho, mount_workspace_ensure, page_json, peer_response};
 
 const SESSION_PATH: &str = "/v3/workspaces/ws1/sessions/sess1";
 const PEERS_PATH: &str = "/v3/workspaces/ws1/sessions/sess1/peers";
+/// Sessions collection — the get-or-create `POST` endpoint that session reads
+/// use, since the server exposes no `GET /sessions/{id}` (only PUT/DELETE).
+const SESSIONS_PATH: &str = "/v3/workspaces/ws1/sessions";
 
 /// A `SessionResponse` wire body with caller-chosen metadata/configuration.
 ///
@@ -144,8 +147,9 @@ async fn session_refresh_updates_caches() {
         json!({"reasoning": {"enabled": false}}),
     );
 
-    Mock::given(method("GET"))
-        .and(path(SESSION_PATH))
+    Mock::given(method("POST"))
+        .and(path(SESSIONS_PATH))
+        .and(body_json(json!({"id": "sess1"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(&updated))
         .expect(1)
         .mount(&server)
@@ -161,8 +165,8 @@ async fn session_refresh_updates_caches() {
     assert_eq!(config.reasoning.unwrap().enabled, Some(false));
 }
 
-/// `get_metadata()` calls `refresh()` → **GET**; it fetches fresh state, it does
-/// not read the cache. The `.expect(1)` proves the network hit.
+/// `get_metadata()` calls `refresh()` → get-or-create **POST**; it fetches fresh
+/// state, it does not read the cache. The `.expect(1)` proves the network hit.
 #[tokio::test]
 async fn session_get_metadata_fetches_fresh() {
     let server = MockServer::start().await;
@@ -170,8 +174,9 @@ async fn session_get_metadata_fetches_fresh() {
 
     let updated = session_body(json!({"k": "v"}), json!({}));
 
-    Mock::given(method("GET"))
-        .and(path(SESSION_PATH))
+    Mock::given(method("POST"))
+        .and(path(SESSIONS_PATH))
+        .and(body_json(json!({"id": "sess1"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(&updated))
         .expect(1)
         .mount(&server)
@@ -181,7 +186,8 @@ async fn session_get_metadata_fetches_fresh() {
     assert_eq!(meta.get("k").unwrap(), "v");
 }
 
-/// `get_configuration()` calls `refresh()` → **GET**; fetches fresh, not cache.
+/// `get_configuration()` calls `refresh()` → get-or-create **POST**; fetches
+/// fresh, not cache.
 #[tokio::test]
 async fn session_get_configuration_fetches_fresh() {
     let server = MockServer::start().await;
@@ -189,8 +195,9 @@ async fn session_get_configuration_fetches_fresh() {
 
     let updated = session_body(json!({}), json!({"summary": {"enabled": true}}));
 
-    Mock::given(method("GET"))
-        .and(path(SESSION_PATH))
+    Mock::given(method("POST"))
+        .and(path(SESSIONS_PATH))
+        .and(body_json(json!({"id": "sess1"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(&updated))
         .expect(1)
         .mount(&server)
@@ -260,15 +267,16 @@ async fn session_set_configuration_puts_to_session_endpoint() {
 
 // ── F6.1: Error paths (real `HonchoError` variants) ──────────────────
 
-/// A `GET` 404 surfaces as `NotFound`. 404 is non-retryable, so the request
-/// fires exactly once.
+/// A get-or-create `POST` 404 surfaces as `NotFound`. 404 is non-retryable, so
+/// the request fires exactly once.
 #[tokio::test]
 async fn session_refresh_propagates_not_found() {
     let server = MockServer::start().await;
     let session = setup(&server).await;
 
-    Mock::given(method("GET"))
-        .and(path(SESSION_PATH))
+    Mock::given(method("POST"))
+        .and(path(SESSIONS_PATH))
+        .and(body_json(json!({"id": "sess1"})))
         .respond_with(
             ResponseTemplate::new(404).set_body_json(json!({"detail": "session not found"})),
         )
