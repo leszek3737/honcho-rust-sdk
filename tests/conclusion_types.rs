@@ -98,8 +98,7 @@ fn conclusion_roundtrip_max() {
 fn conclusion_min_injects_default_level() {
     // The `min` fixture omits `level`; the SDK fills the documented default
     // and emits it, so the wire output carries one extra key.
-    let c: ConclusionResponse =
-        serde_json::from_value(load_fixture("Conclusion", "min")).unwrap();
+    let c: ConclusionResponse = serde_json::from_value(load_fixture("Conclusion", "min")).unwrap();
     assert_eq!(
         c.level,
         ConclusionLevel::Explicit,
