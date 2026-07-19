@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Port of three upstream (Python/TypeScript SDK, commit `14538cfc`) features into
+the Rust SDK.
+
+### Added
+
+- **`ConclusionLevel` enum + `level` field on `ConclusionResponse`.** Mirrors
+  the upstream `Literal["explicit", "deductive", "inductive", "contradiction"]`.
+  `"explicit"` conclusions are extracted directly from messages; the other
+  variants are derived during dreaming. Surfaced as `Conclusion::level()` and
+  the blocking mirror, re-exported from the crate root as
+  `honcho_ai::ConclusionLevel`. Defaults to `Explicit` when the server omits
+  the field (`#[serde(default)]`).
+
+- **Generic free-form `filters` on `ConclusionScope::list()` / `query()`.**
+  Both builders gain a `.filters(HashMap<String, serde_json::Value>)` method
+  that lets callers add arbitrary filter criteria (e.g. `{"level": "explicit"}`
+  to retrieve only non-dream-derived conclusions). Brings `conclusion.rs` into
+  line with the `Option<HashMap<String, serde_json::Value>>` pattern already
+  used by peer / session / message / workspace filters.
+
+### Changed
+
+- **`ConclusionGet::filters` and `ConclusionQuery::filters` are now
+  `Option<HashMap<String, serde_json::Value>>`** (matching the free-form
+  `additionalProperties: true` shape in the OpenAPI spec), replacing the
+  bespoke typed `ConclusionFilters` struct that only modeled
+  `observer_id`/`observed_id`/`session_id`. `ConclusionFilters` is **removed**;
+  the bespoke type was an anomaly — every other list/query type in the SDK
+  already used the generic map. Source-compatible for callers that constructed
+  filters via the builders; a small mechanical migration at the raw-DTO level
+  (the field type changed).
+
+- **`ConclusionGet` drops its `Eq` derive** (keeps `PartialEq`): the new
+  `HashMap<String, serde_json::Value>` element type contains `serde_json::Value`,
+  which is not `Eq` (it can carry `f64` with `NaN`).
+
+### Added (Guards)
+
+- **Reserved-key guard on `list()` / `query()` filters.** Passing the
+  scope-managed keys (`observer`, `observed`, `observer_id`, `observed_id`,
+  `session`, `session_id`) to `ListConclusionsBuilder::filters` — or the
+  peer-pair keys to `QueryConclusionsBuilder::filters` — now returns
+  `HonchoError::Validation` with a clear, machine-readable message pointing at
+  the supported API surface (`.session()` for `list`; pick the peer pair via
+  `peer.conclusions()` / `peer.conclusions_of(target)`). `query()` does not
+  reject `session` / `session_id` because it has no `.session()` method, so
+  `session_id` is a legitimate caller-supplied filter there.
+
 ## [0.2.0] - 2026-06-14
 
 This release tightens the public API surface ahead of `1.0`. It contains

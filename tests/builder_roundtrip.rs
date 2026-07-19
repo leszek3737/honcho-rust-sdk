@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use honcho_ai::types::conclusion::{
-    ConclusionBatchCreate, ConclusionCreate, ConclusionFilters, ConclusionGet, ConclusionQuery,
+    ConclusionBatchCreate, ConclusionCreate, ConclusionGet, ConclusionQuery,
 };
 use honcho_ai::types::dream::{DreamType, ScheduleDreamRequest};
 use honcho_ai::types::message::{
@@ -347,25 +347,16 @@ fn conclusion_batch_create_builder_roundtrip() {
 }
 
 #[test]
-fn conclusion_filters_builder_roundtrip() {
-    let f = ConclusionFilters::builder()
-        .observer_id("alice")
-        .observed_id("bob")
-        .session_id("sess-1")
-        .build();
-    assert_eq!(f.observer_id.as_deref(), Some("alice"));
-    assert_eq!(f.observed_id.as_deref(), Some("bob"));
-    assert_eq!(f.session_id.as_deref(), Some("sess-1"));
-
-    roundtrip(&f);
-}
-
-#[test]
 fn conclusion_get_builder_roundtrip() {
-    let filters = ConclusionFilters::builder().observer_id("alice").build();
+    // `filters` is now a free-form `HashMap<String, Value>` mirroring `PeerGet`.
+    let mut filters = HashMap::new();
+    filters.insert("observer_id".to_owned(), json!("alice"));
     let g = ConclusionGet::builder().filters(filters).build();
     assert_eq!(
-        g.filters.as_ref().unwrap().observer_id.as_deref(),
+        g.filters
+            .as_ref()
+            .and_then(|m| m.get("observer_id"))
+            .and_then(|v| v.as_str()),
         Some("alice")
     );
 
@@ -374,7 +365,8 @@ fn conclusion_get_builder_roundtrip() {
 
 #[test]
 fn conclusion_query_builder_roundtrip() {
-    let filters = ConclusionFilters::builder().session_id("sess-1").build();
+    let mut filters = HashMap::new();
+    filters.insert("session_id".to_owned(), json!("sess-1"));
     let q = ConclusionQuery::builder()
         .query("search text")
         .top_k(5)
@@ -385,7 +377,10 @@ fn conclusion_query_builder_roundtrip() {
     assert_eq!(q.top_k, 5);
     assert_eq!(q.distance, Some(0.8));
     assert_eq!(
-        q.filters.as_ref().unwrap().session_id.as_deref(),
+        q.filters
+            .as_ref()
+            .and_then(|m| m.get("session_id"))
+            .and_then(|v| v.as_str()),
         Some("sess-1")
     );
 

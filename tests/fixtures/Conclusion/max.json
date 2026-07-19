@@ -4,5 +4,6 @@
   "observer_id": "agent_observer",
   "observed_id": "user_42",
   "session_id": "sess_abc",
-  "created_at": "2025-06-15T12:30:45Z"
+  "created_at": "2025-06-15T12:30:45Z",
+  "level": "explicit"
 }

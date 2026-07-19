@@ -11,7 +11,7 @@ mod common;
 use common::{load_fixture, roundtrip, validate_openapi};
 
 use honcho_ai::types::conclusion::{
-    ConclusionBatchCreate, ConclusionCreate, ConclusionFilters, ConclusionGet, ConclusionPage,
+    ConclusionBatchCreate, ConclusionCreate, ConclusionGet, ConclusionLevel, ConclusionPage,
     ConclusionQuery, ConclusionResponse,
 };
 use serde::Serialize;
@@ -72,7 +72,48 @@ macro_rules! case {
 // Standard fixture cases (SDK-output validation + strict round-trip)
 // ---------------------------------------------------------------------------
 
-case!(conclusion, ConclusionResponse, "Conclusion", "Conclusion");
+// `ConclusionResponse` is handled outside `case!` because the `level` field
+// carries `#[serde(default)]` with no `skip_serializing_if`, so the SDK
+// injects `"level": "explicit"` for the `min` fixture, which deliberately
+// omits it. A strict round-trip on `min` would therefore fail on an
+// intentional, documented addition, so `min` gets a dedicated golden-output
+// test instead. `max` already carries `level`, so it round-trips strictly.
+
+#[test]
+fn conclusion_min_validates() {
+    validate_sdk_output::<ConclusionResponse>("Conclusion", "min", "Conclusion");
+}
+
+#[test]
+fn conclusion_max_validates() {
+    validate_sdk_output::<ConclusionResponse>("Conclusion", "max", "Conclusion");
+}
+
+#[test]
+fn conclusion_roundtrip_max() {
+    roundtrip::<ConclusionResponse>(load_fixture("Conclusion", "max"));
+}
+
+#[test]
+fn conclusion_min_injects_default_level() {
+    // The `min` fixture omits `level`; the SDK fills the documented default
+    // and emits it, so the wire output carries one extra key.
+    let c: ConclusionResponse =
+        serde_json::from_value(load_fixture("Conclusion", "min")).unwrap();
+    assert_eq!(
+        c.level,
+        ConclusionLevel::Explicit,
+        "absent level must deserialize to the default"
+    );
+
+    let output = serde_json::to_value(&c).unwrap();
+    assert_eq!(
+        output["level"],
+        json!("explicit"),
+        "min conclusion must serialize with injected default level"
+    );
+}
+
 case!(
     conclusion_create,
     ConclusionCreate,
@@ -97,19 +138,6 @@ case!(
     "Page_Conclusion_",
     "Page_Conclusion_"
 );
-
-// `ConclusionFilters` has no OpenAPI schema (the spec models conclusion filters
-// as a free-form `additionalProperties: true` object), so it gets strict
-// round-trip coverage only — no `validate_openapi` call.
-#[test]
-fn conclusion_filters_roundtrip_min() {
-    roundtrip::<ConclusionFilters>(load_fixture("ConclusionFilters", "min"));
-}
-
-#[test]
-fn conclusion_filters_roundtrip_max() {
-    roundtrip::<ConclusionFilters>(load_fixture("ConclusionFilters", "max"));
-}
 
 // ---------------------------------------------------------------------------
 // ConclusionQuery — handled outside `case!`
@@ -207,21 +235,89 @@ fn conclusion_create_max_field_mapping() {
 }
 
 #[test]
-fn conclusion_filters_max_field_mapping() {
-    let f: ConclusionFilters =
-        serde_json::from_value(load_fixture("ConclusionFilters", "max")).unwrap();
-    assert_eq!(f.observer_id.as_deref(), Some("peer_obs_1"));
-    assert_eq!(f.observed_id.as_deref(), Some("peer_obs_2"));
-    assert_eq!(f.session_id.as_deref(), Some("sess_abc"));
+fn conclusion_response_default_level_is_explicit_when_absent() {
+    // `level` carries `#[serde(default)]`; an older-server payload without it
+    // must deserialize to `Explicit` (the `#[default]` variant).
+    let c: ConclusionResponse = serde_json::from_value(json!({
+        "id": "i",
+        "content": "c",
+        "observer_id": "o",
+        "observed_id": "d",
+        "created_at": "2025-01-01T00:00:00Z",
+    }))
+    .unwrap();
+    assert_eq!(c.level, ConclusionLevel::Explicit);
+}
+
+#[test]
+fn conclusion_response_level_round_trips_each_variant() {
+    // Each snake_case wire string survives a deserialize → serialize cycle.
+    for s in ["explicit", "deductive", "inductive", "contradiction"] {
+        let level: ConclusionLevel = serde_json::from_value(json!(s)).unwrap();
+        let re = serde_json::to_value(level).unwrap();
+        assert_eq!(re, json!(s), "level `{s}` must round-trip");
+    }
+}
+
+#[test]
+fn conclusion_get_filters_is_free_form_map() {
+    // The old typed filters struct was replaced with a free-form
+    // `Option<HashMap<String, Value>>`; any keys the caller supplies must
+    // round-trip unchanged.
+    let g: ConclusionGet = serde_json::from_value(json!({
+        "filters": { "level": "explicit", "arbitrary_key": 42 }
+    }))
+    .unwrap();
+    let f = g.filters.as_ref().expect("filters set");
+    assert_eq!(
+        f.get("level").and_then(serde_json::Value::as_str),
+        Some("explicit")
+    );
+    assert_eq!(
+        f.get("arbitrary_key").and_then(serde_json::Value::as_i64),
+        Some(42)
+    );
+
+    // Re-serialization preserves both keys.
+    let v = serde_json::to_value(&g).unwrap();
+    assert_eq!(v["filters"]["level"], json!("explicit"));
+    assert_eq!(v["filters"]["arbitrary_key"], json!(42));
+}
+
+#[test]
+fn conclusion_query_filters_accepts_session_id() {
+    // On `ConclusionQuery` (unlike the typed past) `session_id` is a legitimate
+    // caller-supplied filter — the type layer must not reject it.
+    let q: ConclusionQuery = serde_json::from_value(json!({
+        "query": "q",
+        "filters": { "session_id": "s1", "level": "deductive" }
+    }))
+    .unwrap();
+    let f = q.filters.as_ref().expect("filters set");
+    assert_eq!(
+        f.get("session_id").and_then(serde_json::Value::as_str),
+        Some("s1")
+    );
+    assert_eq!(
+        f.get("level").and_then(serde_json::Value::as_str),
+        Some("deductive")
+    );
 }
 
 #[test]
 fn conclusion_get_max_unwraps_filters() {
     let g: ConclusionGet = serde_json::from_value(load_fixture("ConclusionGet", "max")).unwrap();
     let f = g.filters.expect("max fixture carries filters");
-    assert_eq!(f.session_id.as_deref(), Some("sess_abc"));
-    assert_eq!(f.observer_id.as_deref(), Some("agent_1"));
-    assert!(f.observed_id.is_none());
+    // Free-form map: assert each key via direct lookup.
+    assert_eq!(
+        f.get("session_id").and_then(serde_json::Value::as_str),
+        Some("sess_abc")
+    );
+    assert_eq!(
+        f.get("observer_id").and_then(serde_json::Value::as_str),
+        Some("agent_1")
+    );
+    assert!(!f.contains_key("observed_id"));
 }
 
 #[test]
@@ -244,8 +340,12 @@ fn conclusion_query_max_field_mapping() {
     assert_eq!(q.top_k, 5);
     assert_eq!(q.distance, Some(0.75));
     let f = q.filters.expect("max fixture carries filters");
-    assert_eq!(f.session_id.as_deref(), Some("sess_abc"));
-    assert!(f.observer_id.is_none());
+    // Free-form map: assert each key via direct lookup.
+    assert_eq!(
+        f.get("session_id").and_then(serde_json::Value::as_str),
+        Some("sess_abc")
+    );
+    assert!(!f.contains_key("observer_id"));
 }
 
 #[test]

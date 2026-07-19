@@ -3,65 +3,9 @@
 mod common;
 use common::{load_fixture, roundtrip};
 
-use honcho_ai::types::conclusion::ConclusionFilters;
 use honcho_ai::types::peer::PeerContextOptions;
 use honcho_ai::types::session::SessionListOptions;
 use serde_json::json;
-
-// --- ConclusionFilters (has Deserialize + builder) ---
-
-#[test]
-fn conclusion_filters_roundtrip_min() {
-    // Strict (A0): `{}` must serialize back to `{}` with no phantom keys.
-    roundtrip::<ConclusionFilters>(load_fixture("ConclusionFilters", "min"));
-}
-
-#[test]
-fn conclusion_filters_roundtrip_max() {
-    // Strict (A0): the `max` fixture carries `observer_id` / `observed_id` /
-    // `session_id`. The old lossy helper hid a dropped field (both sides
-    // symmetrically `None`); strict fidelity now fails loudly if any is lost.
-    // All three are modeled in `src/types/conclusion.rs`, so this passes and
-    // guards against regression.
-    roundtrip::<ConclusionFilters>(load_fixture("ConclusionFilters", "max"));
-}
-
-#[test]
-fn conclusion_filters_empty() {
-    let f = ConclusionFilters::builder().build();
-    let json = serde_json::to_value(&f).unwrap();
-    assert_eq!(json, json!({}));
-}
-
-#[test]
-fn conclusion_filters_partial() {
-    // `on(String, into)` lets the setter take `&str` directly — no `.to_string()`.
-    let f = ConclusionFilters::builder().observer_id("peer1").build();
-    let json = serde_json::to_value(&f).unwrap();
-    assert_eq!(json["observer_id"], "peer1");
-    // `skip_serializing_if`: unset fields must be absent, never `null`.
-    assert!(json.get("observed_id").is_none());
-    assert!(json.get("session_id").is_none());
-}
-
-#[test]
-fn conclusion_filters_full() {
-    // Positive coverage for `observed_id` and `session_id`, which no other test
-    // asserts with a concrete value (only their absence was checked before).
-    let f = ConclusionFilters::builder()
-        .observer_id("obs")
-        .observed_id("subject")
-        .session_id("sess1")
-        .build();
-    let json = serde_json::to_value(&f).unwrap();
-    assert_eq!(json["observer_id"], "obs");
-    assert_eq!(json["observed_id"], "subject");
-    assert_eq!(json["session_id"], "sess1");
-
-    // Re-decoding yields a structurally identical value (derived PartialEq/Eq).
-    let decoded: ConclusionFilters = serde_json::from_value(json).unwrap();
-    assert_eq!(decoded, f);
-}
 
 // --- SessionListOptions (has Deserialize + builder) ---
 
