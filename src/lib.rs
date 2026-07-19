@@ -70,7 +70,7 @@ pub use error::{HonchoError, Result};
 pub use peer::{MessageBuilder, RepresentationBuilder};
 pub use session::SessionRepresentationBuilder;
 
-pub use types::conclusion::ConclusionResponse;
+pub use types::conclusion::{ConclusionLevel, ConclusionResponse};
 pub use types::dialectic::{DialecticOptions, ReasoningLevel};
 pub use types::message::{MessageCreate, MessagePage, MessageResponse, MessageSearchOptions};
 pub use types::pagination::{Page, PageResponse};

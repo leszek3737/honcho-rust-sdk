@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use crate::conclusion::{ConclusionCreateParams, ConclusionScope as AsyncConclusionScope};
 use crate::error::Result;
-use crate::types::conclusion::ConclusionPage;
+use crate::types::conclusion::{ConclusionLevel, ConclusionPage};
 
 use super::runtime::block_on;
 
@@ -58,6 +60,12 @@ impl Conclusion {
     #[must_use]
     pub fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.inner.created_at()
+    }
+
+    /// Reasoning level. See [`crate::Conclusion::level`].
+    #[must_use]
+    pub fn level(&self) -> ConclusionLevel {
+        self.inner.level()
     }
 
     /// Workspace ID.
@@ -289,6 +297,15 @@ impl BlockingListConclusionsBuilder {
         }
     }
 
+    /// Additional free-form filter criteria. See
+    /// [`ListConclusionsBuilder::filters`](crate::conclusion::ListConclusionsBuilder::filters).
+    #[must_use]
+    pub fn filters(self, filters: HashMap<String, serde_json::Value>) -> Self {
+        Self {
+            inner: self.inner.filters(filters),
+        }
+    }
+
     /// Send and return paginated result.
     ///
     /// # Errors
@@ -336,6 +353,15 @@ impl BlockingQueryConclusionsBuilder {
     pub fn distance(self, distance: f64) -> Self {
         Self {
             inner: self.inner.distance(distance),
+        }
+    }
+
+    /// Additional free-form filter criteria. See
+    /// [`QueryConclusionsBuilder::filters`](crate::conclusion::QueryConclusionsBuilder::filters).
+    #[must_use]
+    pub fn filters(self, filters: HashMap<String, serde_json::Value>) -> Self {
+        Self {
+            inner: self.inner.filters(filters),
         }
     }
 

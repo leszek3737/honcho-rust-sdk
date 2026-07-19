@@ -1,5 +1,6 @@
 //! Conclusion wrapper and scoped access.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -9,9 +10,10 @@ use serde::Serialize;
 use crate::error::{HonchoError, Result};
 use crate::http::client::HttpClient;
 use crate::http::routes;
+use crate::types::conclusion::ConclusionLevel;
 use crate::types::conclusion::ConclusionPage;
 use crate::types::conclusion::ConclusionResponse as ConclusionData;
-use crate::types::conclusion::{ConclusionFilters, ConclusionGet, ConclusionQuery};
+use crate::types::conclusion::{ConclusionGet, ConclusionQuery};
 use crate::types::dialectic::RepresentationResponse;
 use crate::types::pagination::paginate_post;
 use crate::types::session::validate_search_params;
@@ -24,6 +26,7 @@ pub(crate) struct ConclusionInner {
     observed_id: String,
     session_id: Option<String>,
     created_at: DateTime<Utc>,
+    level: ConclusionLevel,
 }
 
 /// A conclusion about a peer, produced by observation.
@@ -46,6 +49,7 @@ impl Conclusion {
                 observed_id: resp.observed_id,
                 session_id: resp.session_id,
                 created_at: resp.created_at,
+                level: resp.level,
             }),
         }
     }
@@ -135,6 +139,26 @@ impl Conclusion {
     pub fn created_at(&self) -> DateTime<Utc> {
         // `DateTime<Utc>` is `Copy`, so return by value rather than by reference.
         self.inner.created_at
+    }
+
+    /// Reasoning level of this conclusion (`explicit`, `deductive`,
+    /// `inductive`, or `contradiction`). `explicit` = extracted from
+    /// messages; the rest are derived during dreaming.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use honcho_ai::ConclusionLevel;
+    /// # fn example(c: &honcho_ai::Conclusion) {
+    /// if c.level() == ConclusionLevel::Contradiction {
+    ///     println!("contradiction recorded");
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn level(&self) -> ConclusionLevel {
+        // `ConclusionLevel` is `Copy`, so return by value rather than by reference.
+        self.inner.level
     }
 
     /// The workspace this conclusion belongs to.
@@ -472,6 +496,7 @@ impl ConclusionScope {
             size: 50,
             session_id: None,
             reverse: false,
+            filters: None,
         }
     }
 
@@ -503,6 +528,7 @@ impl ConclusionScope {
             query: query.into(),
             top_k: 10,
             distance: None,
+            filters: None,
         }
     }
 
@@ -668,6 +694,60 @@ pub struct ListConclusionsBuilder {
     size: u64,
     session_id: Option<String>,
     reverse: bool,
+    filters: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Keys managed by [`ConclusionScope::list`] / [`ConclusionScope::query`]: they
+/// derive from the scope's observer/observed pair (and `.session()` on `list`),
+/// so a caller passing them in `filters` would silently override the scope.
+/// `query` does **not** reject `session` / `session_id` because it has no
+/// `.session()` method — `session_id` is a legitimate caller filter there.
+const LIST_RESERVED_FILTERS: [&str; 6] = [
+    "observer",
+    "observed",
+    "observer_id",
+    "observed_id",
+    "session",
+    "session_id",
+];
+const QUERY_RESERVED_FILTERS: [&str; 4] = ["observer", "observed", "observer_id", "observed_id"];
+
+/// Reject caller-supplied filter keys that are managed by the scope.
+///
+/// Returns `Ok(())` if `filters` is `None` or none of its keys clash with
+/// `reserved`; otherwise returns [`HonchoError::Validation`] listing the
+/// offending keys (sorted, machine-readable) with API-surface guidance.
+///
+/// `include_session_guidance` controls whether the message points the caller
+/// at `.session()` — only `list` has that method, so `query` passes `false`.
+fn reject_reserved_filters(
+    filters: Option<&HashMap<String, serde_json::Value>>,
+    reserved: &[&str],
+    include_session_guidance: bool,
+) -> Result<()> {
+    let Some(f) = filters else {
+        return Ok(());
+    };
+    let mut clash: Vec<&str> = reserved
+        .iter()
+        .copied()
+        .filter(|k| f.contains_key(*k))
+        .collect();
+    clash.sort_unstable();
+    if clash.is_empty() {
+        return Ok(());
+    }
+    let joined = clash.join(", ");
+    let guidance = if include_session_guidance {
+        " Use .session() to filter by session."
+    } else {
+        ""
+    };
+    Err(HonchoError::Validation(format!(
+        "Filter key(s) {joined} are managed by this conclusion scope and cannot be passed in \
+         filters. Choose the peer pair via peer.conclusions() / peer.conclusions_of(target).\
+         {guidance}"
+    )))
 }
 
 impl ListConclusionsBuilder {
@@ -713,6 +793,30 @@ impl ListConclusionsBuilder {
         self
     }
 
+    /// Additional free-form filter criteria (e.g. `{"level": "explicit"}`).
+    ///
+    /// Merged on top of the scope's `observer_id` / `observed_id` (and the
+    /// `session_id` injected by [`.session()`](Self::session)). The reserved
+    /// scope-managed keys (`observer`, `observed`, `observer_id`, `observed_id`,
+    /// `session`, `session_id`) are rejected on [`.send()`](Self::send) — use
+    /// `.session()` for session filtering, and pick the peer pair via
+    /// `peer.conclusions()` / `peer.conclusions_of(target)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example(scope: &honcho_ai::ConclusionScope) {
+    /// use std::collections::HashMap;
+    /// let mut filters = HashMap::new();
+    /// filters.insert("level".to_owned(), serde_json::json!("explicit"));
+    /// let _builder = scope.list().filters(filters);
+    /// # }
+    /// ```
+    pub fn filters(mut self, filters: HashMap<String, serde_json::Value>) -> Self {
+        self.filters = Some(filters);
+        self
+    }
+
     /// Reverse the default ordering.
     ///
     /// # Examples
@@ -738,16 +842,28 @@ impl ListConclusionsBuilder {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HonchoError::Validation`] if `filters` contains any
+    /// scope-managed key (`observer`, `observed`, `observer_id`, `observed_id`,
+    /// `session`, `session_id`). Returns [`HonchoError::Server`] if the server
+    /// rejects the request.
     pub async fn send(self) -> Result<ConclusionPage> {
-        let body = ConclusionGet::builder()
-            .filters(
-                ConclusionFilters::builder()
-                    .observer_id(self.scope.inner.observer.clone())
-                    .observed_id(self.scope.inner.observed.clone())
-                    .maybe_session_id(self.session_id)
-                    .build(),
-            )
-            .build();
+        reject_reserved_filters(self.filters.as_ref(), &LIST_RESERVED_FILTERS, true)?;
+        let mut filters = self.filters.unwrap_or_default();
+        filters.insert(
+            "observer_id".to_owned(),
+            serde_json::json!(self.scope.inner.observer.as_str()),
+        );
+        filters.insert(
+            "observed_id".to_owned(),
+            serde_json::json!(self.scope.inner.observed.as_str()),
+        );
+        if let Some(sid) = self.session_id {
+            filters.insert("session_id".to_owned(), serde_json::json!(sid));
+        }
+        let body = ConclusionGet::builder().filters(filters).build();
         let body = serde_json::to_value(&body).map_err(|e| HonchoError::Serialization {
             path: "ConclusionGet".to_owned(),
             source: e,
@@ -772,6 +888,7 @@ pub struct QueryConclusionsBuilder {
     query: String,
     top_k: u32,
     distance: Option<f64>,
+    filters: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl QueryConclusionsBuilder {
@@ -803,6 +920,30 @@ impl QueryConclusionsBuilder {
         self
     }
 
+    /// Additional free-form filter criteria (e.g. `{"level": "deductive"}`).
+    ///
+    /// Merged on top of the scope's `observer_id` / `observed_id`. Because this
+    /// builder has no [`.session()`](ConclusionScope::list) method, `session_id`
+    /// is a legitimate caller-supplied filter here. The reserved peer-pair keys
+    /// (`observer`, `observed`, `observer_id`, `observed_id`) are rejected on
+    /// [`.send()`](Self::send) — pick the pair via `peer.conclusions()` /
+    /// `peer.conclusions_of(target)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn example(scope: &honcho_ai::ConclusionScope) {
+    /// use std::collections::HashMap;
+    /// let mut filters = HashMap::new();
+    /// filters.insert("level".to_owned(), serde_json::json!("deductive"));
+    /// let _builder = scope.query("hobbies").filters(filters);
+    /// # }
+    /// ```
+    pub fn filters(mut self, filters: HashMap<String, serde_json::Value>) -> Self {
+        self.filters = Some(filters);
+        self
+    }
+
     /// Send the query request.
     ///
     /// # Examples
@@ -820,7 +961,8 @@ impl QueryConclusionsBuilder {
     /// # Errors
     ///
     /// Returns [`HonchoError::Validation`] if `query` is empty, `top_k` ∉ [1, 100],
-    /// or `distance` ∉ [0.0, 1.0].
+    /// `distance` ∉ [0.0, 1.0], or `filters` contains any of the scope-managed
+    /// keys (`observer`, `observed`, `observer_id`, `observed_id`).
     pub async fn send(self) -> Result<Vec<Conclusion>> {
         if self.query.trim().is_empty() {
             return Err(HonchoError::Validation(
@@ -840,16 +982,21 @@ impl QueryConclusionsBuilder {
                 e
             }
         })?;
+        reject_reserved_filters(self.filters.as_ref(), &QUERY_RESERVED_FILTERS, false)?;
+        let mut filters = self.filters.unwrap_or_default();
+        filters.insert(
+            "observer_id".to_owned(),
+            serde_json::json!(self.scope.inner.observer.as_str()),
+        );
+        filters.insert(
+            "observed_id".to_owned(),
+            serde_json::json!(self.scope.inner.observed.as_str()),
+        );
         let body = ConclusionQuery::builder()
             .query(self.query)
             .top_k(self.top_k)
             .maybe_distance(self.distance)
-            .filters(
-                ConclusionFilters::builder()
-                    .observer_id(self.scope.inner.observer.clone())
-                    .observed_id(self.scope.inner.observed.clone())
-                    .build(),
-            )
+            .filters(filters)
             .build();
         let body = serde_json::to_value(&body).map_err(|e| HonchoError::Serialization {
             path: "ConclusionQuery".to_owned(),
@@ -894,7 +1041,8 @@ mod tests {
             "observer_id": "alice",
             "observed_id": "bob",
             "session_id": null,
-            "created_at": "2025-01-15T10:30:00Z"
+            "created_at": "2025-01-15T10:30:00Z",
+            "level": "explicit",
         })
     }
 
@@ -909,7 +1057,8 @@ mod tests {
             "observer_id": "alice",
             "observed_id": "bob",
             "session_id": session_id,
-            "created_at": "2025-01-15T10:30:00Z"
+            "created_at": "2025-01-15T10:30:00Z",
+            "level": "explicit",
         })
     }
 
@@ -977,6 +1126,7 @@ mod tests {
             observed_id: "obd".to_owned(),
             session_id,
             created_at: chrono::Utc::now(),
+            level: ConclusionLevel::Explicit,
         }
     }
 
@@ -1427,6 +1577,200 @@ mod tests {
 
         let err = scope.query("test").distance(1.1).send().await.unwrap_err();
         assert!(matches!(err, HonchoError::Validation(_)));
+    }
+
+    // ── filters(): reserved-key guard + merge behavior ──────────────────
+
+    fn filters_pair(level: &str) -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        m.insert("level".to_owned(), serde_json::json!(level));
+        m
+    }
+
+    #[tokio::test]
+    async fn list_with_filters_merges_level() {
+        let server = MockServer::start().await;
+        let scope = make_scope(&server);
+
+        // Caller's `level` is layered on top of the scope's observer_id /
+        // observed_id, all three must appear in the request body.
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/conclusions/list"))
+            .and(body_string_contains("\"observer_id\":\"alice\""))
+            .and(body_string_contains("\"observed_id\":\"bob\""))
+            .and(body_string_contains("\"level\":\"explicit\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(page_json(vec![conclusion_json("x", "c1")])),
+            )
+            .mount(&server)
+            .await;
+
+        let page = scope
+            .list()
+            .filters(filters_pair("explicit"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.total(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_rejects_reserved_filter_observer_id() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("observer_id".to_owned(), serde_json::json!("x"));
+
+        let err = scope.list().filters(filters).send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn list_rejects_reserved_filter_observer() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("observer".to_owned(), serde_json::json!("x"));
+
+        let err = scope.list().filters(filters).send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn list_rejects_reserved_filter_observed() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("observed".to_owned(), serde_json::json!("x"));
+
+        let err = scope.list().filters(filters).send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn list_rejects_reserved_filter_session() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("session".to_owned(), serde_json::json!("x"));
+
+        let err = scope.list().filters(filters).send().await.unwrap_err();
+        let HonchoError::Validation(msg) = err else {
+            panic!("expected validation error, got: {err:?}");
+        };
+        assert!(msg.contains("session"), "error should name the key: {msg}");
+    }
+
+    #[tokio::test]
+    async fn list_rejects_reserved_filter_session_id() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("session_id".to_owned(), serde_json::json!("x"));
+
+        let err = scope.list().filters(filters).send().await.unwrap_err();
+        assert_eq!(err.code(), "validation_error");
+        let HonchoError::Validation(msg) = &err else {
+            panic!("expected validation error, got: {err:?}");
+        };
+        // `.session()` is the supported way to set session_id on `list`.
+        assert!(
+            msg.contains(".session()"),
+            "error should point at .session(): {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_with_filters_keeps_session_id() {
+        let server = MockServer::start().await;
+        let scope = make_scope(&server);
+
+        // `query` has no `.session()`, so `session_id` is a legitimate caller
+        // filter and must reach the wire alongside observer_id / observed_id /
+        // the caller-supplied `level`.
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/conclusions/query"))
+            .and(body_string_contains("\"observer_id\":\"alice\""))
+            .and(body_string_contains("\"observed_id\":\"bob\""))
+            .and(body_string_contains("\"session_id\":\"s1\""))
+            .and(body_string_contains("\"level\":\"deductive\""))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vec![conclusion_json("x", "c1")]),
+            )
+            .mount(&server)
+            .await;
+
+        let mut filters = HashMap::new();
+        filters.insert("session_id".to_owned(), serde_json::json!("s1"));
+        filters.insert("level".to_owned(), serde_json::json!("deductive"));
+        let results = scope
+            .query("hobbies")
+            .filters(filters)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn query_rejects_reserved_filter_observer_id() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("observer_id".to_owned(), serde_json::json!("x"));
+
+        let err = scope.query("x").filters(filters).send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn query_rejects_reserved_filter_observer() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("observer".to_owned(), serde_json::json!("x"));
+
+        let err = scope.query("x").filters(filters).send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn query_rejects_reserved_filter_observed() {
+        let scope =
+            ConclusionScope::new(test_http(), "ws".to_owned(), "a".to_owned(), "b".to_owned());
+        let mut filters = HashMap::new();
+        filters.insert("observed".to_owned(), serde_json::json!("x"));
+
+        let err = scope.query("x").filters(filters).send().await.unwrap_err();
+        assert!(matches!(err, HonchoError::Validation(_)));
+        assert_eq!(err.code(), "validation_error");
+    }
+
+    #[tokio::test]
+    async fn query_accepts_session_id_in_filters() {
+        let server = MockServer::start().await;
+        let scope = make_scope(&server);
+
+        // Mirror of `query_with_filters_keeps_session_id` focused on the
+        // accept-path: passing only `session_id` must not raise (the reserved
+        // set for `query` excludes `session` / `session_id`).
+        Mock::given(method("POST"))
+            .and(path("/v3/workspaces/ws1/conclusions/query"))
+            .and(body_string_contains("\"session_id\":\"sx\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let mut filters = HashMap::new();
+        filters.insert("session_id".to_owned(), serde_json::json!("sx"));
+        let results = scope.query("q").filters(filters).send().await.unwrap();
+        assert!(results.is_empty());
     }
 
     // ── F9.5: ConclusionScope::delete tests ──────────────────────────────
