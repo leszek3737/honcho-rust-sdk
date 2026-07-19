@@ -717,10 +717,13 @@ const QUERY_RESERVED_FILTERS: [&str; 4] = ["observer", "observed", "observer_id"
 /// Returns `Ok(())` if `filters` is `None` or none of its keys clash with
 /// `reserved`; otherwise returns [`HonchoError::Validation`] listing the
 /// offending keys (sorted, machine-readable) with API-surface guidance.
+///
+/// `include_session_guidance` controls whether the message points the caller
+/// at `.session()` — only `list` has that method, so `query` passes `false`.
 fn reject_reserved_filters(
     filters: Option<&HashMap<String, serde_json::Value>>,
     reserved: &[&str],
-    op: &str,
+    include_session_guidance: bool,
 ) -> Result<()> {
     let Some(f) = filters else {
         return Ok(());
@@ -734,14 +737,16 @@ fn reject_reserved_filters(
     if clash.is_empty() {
         return Ok(());
     }
-    let guidance = if op == "list" {
+    let joined = clash.join(", ");
+    let guidance = if include_session_guidance {
         " Use .session() to filter by session."
     } else {
         ""
     };
     Err(HonchoError::Validation(format!(
-        "Filter key(s) {clash:?} are managed by this conclusion scope and cannot be passed in \
-         filters. Choose the peer pair via peer.conclusions / peer.conclusions_of(target).{guidance}"
+        "Filter key(s) {joined} are managed by this conclusion scope and cannot be passed in \
+         filters. Choose the peer pair via peer.conclusions() / peer.conclusions_of(target).\
+         {guidance}"
     )))
 }
 
@@ -845,7 +850,7 @@ impl ListConclusionsBuilder {
     /// `session`, `session_id`). Returns [`HonchoError::Server`] if the server
     /// rejects the request.
     pub async fn send(self) -> Result<ConclusionPage> {
-        reject_reserved_filters(self.filters.as_ref(), &LIST_RESERVED_FILTERS, "list")?;
+        reject_reserved_filters(self.filters.as_ref(), &LIST_RESERVED_FILTERS, true)?;
         let mut filters = self.filters.unwrap_or_default();
         filters.insert(
             "observer_id".to_owned(),
@@ -977,7 +982,7 @@ impl QueryConclusionsBuilder {
                 e
             }
         })?;
-        reject_reserved_filters(self.filters.as_ref(), &QUERY_RESERVED_FILTERS, "query")?;
+        reject_reserved_filters(self.filters.as_ref(), &QUERY_RESERVED_FILTERS, false)?;
         let mut filters = self.filters.unwrap_or_default();
         filters.insert(
             "observer_id".to_owned(),
